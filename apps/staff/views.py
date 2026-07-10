@@ -1,0 +1,470 @@
+"""Staff dashboard API — full CRUD behind IsAdminUser (is_staff)."""
+
+from decimal import Decimal
+
+from django.db import transaction
+from django.db.models import Count, OuterRef, Q, Subquery, Sum
+from django.http import HttpResponse
+from django.utils import timezone
+from rest_framework import mixins, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import IsAdminUser
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+from apps.bookings import invoices
+from apps.bookings.models import Booking, Invoice, Payment
+from apps.bookings.reports import generate_guide_report_pdf
+from apps.bookings.serializers import BookingPublicSerializer
+from apps.packages.models import KidPricingRule, Package, PackageRoom
+from apps.ships.models import FoodMenuItem, Room, RoomType, Ship
+
+from .serializers import (
+    StaffBookingCreateSerializer,
+    StaffBookingDetailSerializer,
+    StaffBookingListSerializer,
+    StaffBookingUpdateSerializer,
+    StaffFoodMenuItemSerializer,
+    StaffInvoiceSerializer,
+    StaffKidPricingRuleSerializer,
+    StaffPackageRoomSerializer,
+    StaffPackageSerializer,
+    StaffPaymentSerializer,
+    StaffRoomSerializer,
+    StaffRoomTypeSerializer,
+    StaffTokenObtainPairSerializer,
+)
+
+
+class StaffPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class StaffLoginView(TokenObtainPairView):
+    serializer_class = StaffTokenObtainPairSerializer
+
+
+class StaffLogoutView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        try:
+            RefreshToken(request.data.get("refresh")).blacklist()
+        except Exception:
+            pass  # already invalid/blacklisted — logout is idempotent
+        return Response({"detail": "ok"})
+
+
+def package_stats_queryset():
+    """All packages annotated with booking/collection stats. Subqueries avoid
+    the classic multi-join aggregate duplication bug."""
+    bookings = Booking.objects.filter(package=OuterRef("pk")).exclude(
+        status=Booking.Status.CANCELLED
+    )
+    return (
+        Package.objects.all()
+        .select_related("ship")
+        .annotate(
+            bookings_count=Subquery(
+                bookings.values("package").annotate(c=Count("pk")).values("c")[:1]
+            ),
+            paid_total=Subquery(
+                bookings.values("package").annotate(s=Sum("paid_amount")).values("s")[:1]
+            ),
+            due_total=Subquery(
+                bookings.values("package").annotate(s=Sum("due_amount")).values("s")[:1]
+            ),
+            rooms_total=Subquery(
+                PackageRoom.objects.filter(package=OuterRef("pk"))
+                .values("package").annotate(c=Count("pk")).values("c")[:1]
+            ),
+        )
+        .order_by("-start_date")
+    )
+
+
+def ship_stats_queryset():
+    """All ships annotated with upcoming-package and booking/collection stats,
+    for the dashboard's multi-ship breakdown (subqueries — no join fanout)."""
+    upcoming_packages = Package.objects.filter(
+        ship=OuterRef("pk"), status=Package.Status.OPEN, end_date__gte=timezone.localdate()
+    )
+    active_bookings = Booking.objects.filter(package__ship=OuterRef("pk")).exclude(
+        status=Booking.Status.CANCELLED
+    )
+    return Ship.objects.all().annotate(
+        upcoming_packages=Subquery(
+            upcoming_packages.values("ship").annotate(c=Count("pk")).values("c")[:1]
+        ),
+        active_bookings=Subquery(
+            active_bookings.values("package__ship").annotate(c=Count("pk")).values("c")[:1]
+        ),
+        paid_total=Subquery(
+            active_bookings.values("package__ship")
+            .annotate(s=Sum("paid_amount"))
+            .values("s")[:1]
+        ),
+        due_total=Subquery(
+            active_bookings.values("package__ship")
+            .annotate(s=Sum("due_amount"))
+            .values("s")[:1]
+        ),
+    )
+
+
+class StaffPackageViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffPackageSerializer
+    pagination_class = StaffPagination
+
+    def get_queryset(self):
+        return package_stats_queryset()
+
+    @action(detail=True, methods=["post"], url_path="close-booking")
+    def close_booking(self, request, pk=None):
+        package = self.get_object()
+        package.is_booking_open = False
+        package.save()
+        return Response({"detail": "Booking closed."})
+
+    @action(detail=True, methods=["post"], url_path="open-booking")
+    def open_booking(self, request, pk=None):
+        package = self.get_object()
+        package.is_booking_open = True
+        package.save()
+        return Response({"detail": "Booking reopened."})
+
+    @action(detail=True, methods=["post"], url_path="generate-rooms")
+    def generate_rooms(self, request, pk=None):
+        package = self.get_object()
+        created = 0
+        for room in package.ship.rooms.all():
+            _, was_created = PackageRoom.objects.get_or_create(package=package, room=room)
+            created += was_created
+        return Response({"detail": f"{created} room(s) attached."})
+
+    @action(detail=True, methods=["get"])
+    def rooms(self, request, pk=None):
+        """Room map for one package: every attached room with its status and,
+        when booked, the active booking summary (staff-only data)."""
+        package = self.get_object()
+        package_rooms = (
+            PackageRoom.objects.filter(package=package)
+            .select_related("room__room_type")
+            .order_by("room__floor_number", "room__room_number")
+        )
+        bookings_by_room = {
+            b.room_id: b
+            for b in Booking.objects.filter(package=package).exclude(
+                status=Booking.Status.CANCELLED
+            )
+        }
+        serializer = StaffPackageRoomSerializer(
+            package_rooms, many=True, context={"bookings_by_room": bookings_by_room}
+        )
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"], url_path="guide-report")
+    def guide_report(self, request, pk=None):
+        package = self.get_object()
+        pdf = generate_guide_report_pdf(package)
+        response = HttpResponse(pdf, content_type="application/pdf")
+        response["Content-Disposition"] = (
+            f'attachment; filename="guide-report-{package.start_date}.pdf"'
+        )
+        return response
+
+
+class StaffBookingViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get_queryset(self):
+        qs = Booking.objects.select_related("package__ship", "room__room_type").order_by(
+            "-created_at"
+        )
+        params = self.request.query_params
+        if params.get("package"):
+            qs = qs.filter(package_id=params["package"])
+        if params.get("status"):
+            qs = qs.filter(status=params["status"])
+        if params.get("search"):
+            term = params["search"]
+            qs = qs.filter(
+                Q(booking_code__icontains=term)
+                | Q(customer_name__icontains=term)
+                | Q(phone__icontains=term)
+                | Q(email__icontains=term)
+            )
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return StaffBookingCreateSerializer
+        if self.action in ("update", "partial_update"):
+            return StaffBookingUpdateSerializer
+        if self.action == "retrieve":
+            return StaffBookingDetailSerializer
+        return StaffBookingListSerializer
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        """Aggregate totals across the *entire* filtered set (not just one
+        page), so the dashboard's summary cards show true figures that still
+        honor the active package/status/search filters."""
+        qs = self.get_queryset()
+        agg = qs.aggregate(
+            total=Sum("total_amount"),
+            paid=Sum("paid_amount"),
+            due=Sum("due_amount"),
+        )
+        by_status = {
+            value: 0 for value, _ in Booking.Status.choices
+        }
+        for row in qs.values("status").annotate(c=Count("pk")):
+            by_status[row["status"]] = row["c"]
+
+        count = qs.count()
+        active = qs.exclude(status=Booking.Status.CANCELLED)
+        active_count = active.count()
+        fully_paid = by_status.get(Booking.Status.FULLY_PAID, 0) + by_status.get(
+            Booking.Status.COMPLETED, 0
+        )
+        fully_paid_rate = (
+            (Decimal(fully_paid) / Decimal(active_count) * 100).quantize(Decimal("0.1"))
+            if active_count > 0
+            else Decimal("0.0")
+        )
+
+        def money(value):
+            return str((value or Decimal("0.00")).quantize(Decimal("0.01")))
+
+        return Response(
+            {
+                "count": count,
+                "total_amount": money(agg["total"]),
+                "paid_amount": money(agg["paid"]),
+                "due_amount": money(agg["due"]),
+                "fully_paid_rate": str(fully_paid_rate),
+                "by_status": by_status,
+            }
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        booking = serializer.save()
+        return Response(
+            BookingPublicSerializer(booking).data, status=status.HTTP_201_CREATED
+        )
+
+    def update(self, request, *args, **kwargs):
+        response = super().update(request, *args, **kwargs)
+        # Return the full detail shape so the dashboard can refresh in place.
+        booking = self.get_object()
+        return Response(StaffBookingDetailSerializer(booking).data)
+
+
+class StaffPaymentViewSet(
+    mixins.CreateModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet
+):
+    """List payments + record manual (cash/offline) collections — e.g. dues
+    the guide collects on the ship."""
+
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffPaymentSerializer
+    pagination_class = StaffPagination
+
+    def get_queryset(self):
+        qs = Payment.objects.select_related("booking").order_by("-created_at")
+        if self.request.query_params.get("booking"):
+            qs = qs.filter(booking_id=self.request.query_params["booking"])
+        return qs
+
+    def perform_create(self, serializer):
+        payment = serializer.save(
+            gateway=serializer.validated_data.get("gateway") or "cash",
+            status=Payment.Status.SUCCESS,
+            paid_at=timezone.now(),
+        )
+        # Same invoice-per-payment behavior as gateway payments (Phase 5).
+        booking = payment.booking
+        transaction.on_commit(lambda: invoices.create_and_send_invoice(booking))
+
+
+class StaffRoomTypeViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffRoomTypeSerializer
+    queryset = RoomType.objects.all().order_by("max_adults")
+
+
+class StaffRoomViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffRoomSerializer
+    pagination_class = StaffPagination
+
+    def get_queryset(self):
+        return Room.objects.select_related("room_type", "ship").order_by(
+            "floor_number", "room_number"
+        )
+
+
+class StaffKidPricingRuleViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffKidPricingRuleSerializer
+    queryset = KidPricingRule.objects.all().order_by("min_age")
+
+
+class StaffFoodMenuItemViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffFoodMenuItemSerializer
+    queryset = FoodMenuItem.objects.select_related("ship").order_by(
+        "ship", "day", "meal_type", "order", "id"
+    )
+
+
+class StaffInvoiceViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffInvoiceSerializer
+    pagination_class = StaffPagination
+
+    def get_queryset(self):
+        qs = Invoice.objects.select_related("booking").order_by("-created_at")
+        if self.request.query_params.get("booking"):
+            qs = qs.filter(booking_id=self.request.query_params["booking"])
+        return qs
+
+    @action(detail=True, methods=["post"])
+    def resend(self, request, pk=None):
+        invoice = self.get_object()
+        invoices.send_invoice_email(invoice)
+        return Response({"detail": "Invoice email sent."})
+
+
+class StaffOverviewView(APIView):
+    """Aggregate stats for the dashboard landing page."""
+
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        today = timezone.localdate()
+        week_start = today - timezone.timedelta(days=today.weekday())
+
+        active = Booking.objects.exclude(status=Booking.Status.CANCELLED)
+        totals = active.aggregate(paid=Sum("paid_amount"), due=Sum("due_amount"))
+        total_collected = totals["paid"] or Decimal("0.00")
+        total_due = totals["due"] or Decimal("0.00")
+        total_expected = total_collected + total_due
+        collection_rate = (
+            (total_collected / total_expected * 100).quantize(Decimal("0.1"))
+            if total_expected > 0
+            else Decimal("0.0")
+        )
+
+        upcoming = Package.objects.filter(
+            status=Package.Status.OPEN, end_date__gte=today
+        ).count()
+
+        status_counts = dict(
+            Booking.objects.values_list("status").annotate(c=Count("pk")).order_by()
+        )
+        bookings_by_status = {
+            value: status_counts.get(value, 0) for value, _ in Booking.Status.choices
+        }
+
+        recent_bookings = [
+            {
+                "id": b.id,
+                "booking_code": b.booking_code,
+                "customer_name": b.customer_name,
+                "package_title": b.package.marketing_title or str(b.package),
+                "room_number": b.room.room_number,
+                "status": b.status,
+                "total_amount": b.total_amount,
+                "paid_amount": b.paid_amount,
+                "due_amount": b.due_amount,
+                "created_at": b.created_at,
+            }
+            for b in Booking.objects.select_related("package", "room")
+            .order_by("-created_at")[:8]
+        ]
+
+        recent_payments = [
+            {
+                "id": pay.id,
+                "booking_code": pay.booking.booking_code,
+                "amount": pay.amount,
+                "gateway": pay.gateway,
+                "paid_at": pay.paid_at,
+            }
+            for pay in Payment.objects.filter(status=Payment.Status.SUCCESS)
+            .select_related("booking")
+            .order_by("-paid_at")[:6]
+        ]
+
+        by_ship = [
+            {
+                "ship_id": s.id,
+                "ship_name": s.name,
+                "upcoming_packages": s.upcoming_packages or 0,
+                "active_bookings": s.active_bookings or 0,
+                "paid_total": s.paid_total or Decimal("0.00"),
+                "due_total": s.due_total or Decimal("0.00"),
+            }
+            for s in ship_stats_queryset()
+        ]
+
+        per_package = []
+        for p in package_stats_queryset()[:8]:
+            bookings_count = p.bookings_count or 0
+            rooms_total = p.rooms_total or 0
+            occupancy_pct = (
+                (Decimal(bookings_count) / Decimal(rooms_total) * 100).quantize(
+                    Decimal("0.1")
+                )
+                if rooms_total > 0
+                else Decimal("0.0")
+            )
+            per_package.append(
+                {
+                    "id": p.id,
+                    "title": p.marketing_title or str(p),
+                    "start_date": p.start_date,
+                    "status": p.status,
+                    "is_bookable": p.is_bookable(),
+                    "paid_total": p.paid_total or Decimal("0.00"),
+                    "due_total": p.due_total or Decimal("0.00"),
+                    "bookings_count": bookings_count,
+                    "occupancy_pct": occupancy_pct,
+                }
+            )
+
+        return Response(
+            {
+                "upcoming_packages": upcoming,
+                "active_bookings": active.count(),
+                "total_collected": total_collected,
+                "total_due": total_due,
+                "total_revenue_expected": total_expected,
+                "collection_rate": collection_rate,
+                "pending_payment_bookings": status_counts.get(
+                    Booking.Status.PENDING, 0
+                ),
+                "bookings_today": Booking.objects.filter(
+                    created_at__date=today
+                ).count(),
+                "bookings_this_week": Booking.objects.filter(
+                    created_at__date__gte=week_start
+                ).count(),
+                "bookings_by_status": bookings_by_status,
+                "recent_bookings": recent_bookings,
+                "recent_payments": recent_payments,
+                "by_ship": by_ship,
+                "packages": per_package,
+            }
+        )
