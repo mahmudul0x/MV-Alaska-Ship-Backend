@@ -1,5 +1,7 @@
 from datetime import datetime, time, timedelta
 
+from django.contrib.postgres.constraints import ExclusionConstraint
+from django.contrib.postgres.fields.ranges import RangeOperators
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
@@ -73,14 +75,65 @@ class Package(models.Model):
                 condition=models.Q(end_date__gt=models.F("start_date")),
                 name="package_end_after_start",
             ),
+            # DB-level backstop for clean()'s overlap check: no two active
+            # packages on one ship may cover the same nights, even via raw ORM
+            # writes or two staff sessions racing. daterange() defaults to
+            # half-open [), so same-day turnaround stays allowed.
+            ExclusionConstraint(
+                name="excl_ship_package_date_overlap",
+                expressions=[
+                    ("ship", RangeOperators.EQUAL),
+                    (
+                        models.Func(
+                            models.F("start_date"),
+                            models.F("end_date"),
+                            function="daterange",
+                        ),
+                        RangeOperators.OVERLAPS,
+                    ),
+                ],
+                condition=~models.Q(status__in=("draft", "cancelled")),
+            ),
         ]
 
     def __str__(self):
         return f"{self.ship.name}: {self.start_date} – {self.end_date}"
 
+    # Statuses that occupy the ship's calendar. DRAFT and CANCELLED packages
+    # never conflict — only real (sellable or sailed) voyages do.
+    ACTIVE_STATUSES = (Status.OPEN, Status.CLOSED, Status.COMPLETED)
+
     def clean(self):
         if self.start_date and self.end_date and self.end_date <= self.start_date:
             raise ValidationError({"end_date": "End date must be after start date."})
+        # One ship cannot run two voyages over the same nights. Same-day
+        # turnaround (this end_date == next start_date) is allowed, so the
+        # comparison is half-open: [start_date, end_date).
+        if (
+            self.ship_id
+            and self.start_date
+            and self.end_date
+            and self.status in self.ACTIVE_STATUSES
+        ):
+            overlap = (
+                Package.objects.exclude(pk=self.pk)
+                .filter(
+                    ship_id=self.ship_id,
+                    status__in=self.ACTIVE_STATUSES,
+                    start_date__lt=self.end_date,
+                    end_date__gt=self.start_date,
+                )
+                .first()
+            )
+            if overlap:
+                raise ValidationError(
+                    {
+                        "start_date": (
+                            "Dates overlap with another package on this ship: "
+                            f"{overlap} — the same room would be sold twice."
+                        )
+                    }
+                )
 
     def default_cutoff(self):
         """Noon (Asia/Dhaka) the day before the tour starts — PRD §5.5."""

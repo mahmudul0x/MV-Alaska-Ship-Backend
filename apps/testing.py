@@ -16,7 +16,11 @@ class ThrottlelessTestMixin:
     def setUpClass(cls):
         super().setUpClass()
         cls._saved_throttle_rates = SimpleRateThrottle.THROTTLE_RATES
-        SimpleRateThrottle.THROTTLE_RATES = {"anon": None, "booking": None}
+        SimpleRateThrottle.THROTTLE_RATES = {
+            "anon": None,
+            "booking": None,
+            "quote": None,
+        }
 
     @classmethod
     def tearDownClass(cls):

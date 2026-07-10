@@ -147,6 +147,25 @@ class StaffPackageSerializer(serializers.ModelSerializer):
     def get_is_bookable(self, package):
         return package.is_bookable()
 
+    def validate(self, attrs):
+        # DRF never calls model clean(), so without this an inverted date
+        # range or a ship-date overlap would hit the DB constraints and 500.
+        # Merge with the existing instance so partial updates validate too
+        # (same pattern as StaffKidPricingRuleSerializer).
+        def value(field):
+            return attrs.get(field, getattr(self.instance, field, None))
+
+        package = Package(
+            ship=value("ship"),
+            start_date=value("start_date"),
+            end_date=value("end_date"),
+            status=value("status") or Package.Status.DRAFT,
+        )
+        if self.instance:
+            package.pk = self.instance.pk
+        package.clean()
+        return attrs
+
 
 class StaffPaymentSerializer(serializers.ModelSerializer):
     booking_code = serializers.CharField(source="booking.booking_code", read_only=True)

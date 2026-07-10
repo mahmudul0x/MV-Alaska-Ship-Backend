@@ -26,6 +26,13 @@ class BookingViewSet(
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "booking"
 
+    def get_throttles(self):
+        # The wizard fires a quote on every pax change; those previews must
+        # not drain the (much stricter) booking-creation budget.
+        if self.action == "quote":
+            self.throttle_scope = "quote"
+        return super().get_throttles()
+
     def get_serializer_class(self):
         if self.action == "create":
             return BookingCreateSerializer

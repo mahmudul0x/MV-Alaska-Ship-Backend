@@ -2,6 +2,7 @@ from calendar import monthrange
 from datetime import date, timedelta
 
 from django.db.models import Exists, OuterRef
+from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -51,7 +52,9 @@ class CalendarView(APIView):
     """
 
     def get(self, request):
-        today = date.today()
+        # Asia/Dhaka "today", like every other availability decision — the
+        # server OS clock (UTC on Railway) lags Dhaka by 6 hours.
+        today = timezone.localdate()
         try:
             year = int(request.query_params.get("year", today.year))
             month = int(request.query_params.get("month", today.month))

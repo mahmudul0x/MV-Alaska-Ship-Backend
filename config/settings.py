@@ -34,6 +34,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.postgres",  # ExclusionConstraint (package overlap guard)
     # Third-party
     "rest_framework",
     "rest_framework_simplejwt.token_blacklist",
@@ -145,7 +146,13 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": "100/min", "booking": "10/min"},
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/min",
+        "booking": "10/min",
+        # Live price previews (quote) — fired per guest-count change in the
+        # wizard, so far looser than actual booking creation.
+        "quote": "60/min",
+    },
     "EXCEPTION_HANDLER": "config.exceptions.exception_handler",
 }
 
