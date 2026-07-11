@@ -14,10 +14,10 @@ from decimal import Decimal, InvalidOperation
 import requests
 from django.db import transaction
 from django.utils import timezone
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, ValidationError
 
 from . import invoices, sslcommerz
-from .models import Payment
+from .models import Booking, Payment
 from .sslcommerz import GatewayError
 
 logger = logging.getLogger(__name__)
@@ -34,21 +34,54 @@ def initiate_payment(booking, payment_type, amount=None):
 
     The amount is decided server-side: full → the current due; partial → the
     serializer-validated amount (0 < amount <= due).
+
+    The serializer's status/due checks are check-then-act, so everything is
+    re-verified here under a lock on the booking row — the expiry cron may
+    cancel the booking between the two, and a live gateway session for a
+    CANCELLED booking would feed real money onto a resold room. Any older
+    still-PENDING session is superseded (cancelled) so at most one live
+    session exists per booking and a two-tab customer cannot double-pay.
     """
-    if payment_type == Payment.PaymentType.FULL:
-        amount = booking.due_amount
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        if booking.status in (Booking.Status.CANCELLED, Booking.Status.COMPLETED):
+            raise ValidationError(
+                {"payment_type": "This booking can no longer be paid."}
+            )
+        if booking.due_amount <= 0:
+            raise ValidationError(
+                {"payment_type": "Nothing is due on this booking."}
+            )
+        if payment_type == Payment.PaymentType.FULL:
+            amount = booking.due_amount
+        elif amount is None or amount > booking.due_amount:
+            raise ValidationError(
+                {"amount": f"Amount exceeds the due amount ({booking.due_amount})."}
+            )
 
-    payment = Payment.objects.create(
-        booking=booking,
-        amount=amount,
-        payment_type=payment_type,
-        gateway="sslcommerz",
-        status=Payment.Status.PENDING,
-    )
-    # pk exists only after create — tran_id is unique and booking-traceable.
-    payment.transaction_id = f"{booking.booking_code}-P{payment.pk}"
-    payment.save(update_fields=["transaction_id"])
+        superseded = booking.payments.filter(
+            status=Payment.Status.PENDING
+        ).update(status=Payment.Status.CANCELLED)
+        if superseded:
+            logger.info(
+                "Superseded %d pending session(s) for %s with a new one",
+                superseded,
+                booking.booking_code,
+            )
 
+        payment = Payment.objects.create(
+            booking=booking,
+            amount=amount,
+            payment_type=payment_type,
+            gateway="sslcommerz",
+            status=Payment.Status.PENDING,
+        )
+        # pk exists only after create — tran_id is unique and booking-traceable.
+        payment.transaction_id = f"{booking.booking_code}-P{payment.pk}"
+        payment.save(update_fields=["transaction_id"])
+
+    # The gateway HTTP call happens outside the lock — the PENDING payment is
+    # committed, so the expiry cron already treats the hold as protected.
     try:
         gateway_url = sslcommerz.create_session(payment)
     except (requests.RequestException, GatewayError, ValueError) as exc:
@@ -78,6 +111,30 @@ def process_payment_result(tran_id, val_id):
         if payment.status == Payment.Status.SUCCESS:
             return payment  # duplicate notification — already credited
 
+        if payment.status != Payment.Status.PENDING:
+            # Superseded/closed session — never credit it (crediting would
+            # double-charge the two-tab customer). But if the gateway says
+            # real money landed on it, flag it loudly for a manual refund.
+            try:
+                data = sslcommerz.validate_payment(val_id)
+            except (requests.RequestException, ValueError) as exc:
+                logger.error(
+                    "Validation API error for closed payment %s: %s", tran_id, exc
+                )
+                return payment
+            payment.gateway_payload = data
+            if _verdict_is_valid(payment, tran_id, data):
+                payment.gateway_payload = {**data, "requires_refund": True}
+                logger.error(
+                    "Money received for %s payment %s (booking %s) — NOT "
+                    "credited; refund the customer at the gateway.",
+                    payment.status,
+                    tran_id,
+                    payment.booking.booking_code,
+                )
+            payment.save(update_fields=["gateway_payload"])
+            return payment
+
         try:
             data = sslcommerz.validate_payment(val_id)
         except (requests.RequestException, ValueError) as exc:
@@ -95,10 +152,21 @@ def process_payment_result(tran_id, val_id):
         payment.save()  # SUCCESS → booking paid/due/status refresh (SUM-based)
 
         if payment.status == Payment.Status.SUCCESS:
+            # refresh_paid_amount() synced this instance under the booking
+            # row lock, so its status is current for the whole transaction.
+            booking = payment.booking
+            if booking.status == Booking.Status.CANCELLED:
+                # Money-in-flight edge: the hold expired while the customer
+                # was paying and the room may already be resold.
+                logger.error(
+                    "Payment %s settled on CANCELLED booking %s — refund or "
+                    "rebook manually.",
+                    tran_id,
+                    booking.booking_code,
+                )
             # After commit so email trouble can never roll back the payment.
             # Duplicate IPNs never reach here (SUCCESS gate above), so exactly
             # one invoice per settled payment.
-            booking = payment.booking
             transaction.on_commit(lambda: invoices.create_and_send_invoice(booking))
     return payment
 

@@ -134,36 +134,60 @@ class Package(models.Model):
                         )
                     }
                 )
+        # A cutoff after departure day would keep the public booking API
+        # selling cabins while the ship is at sea (the cutoff is the only
+        # time gate). Validate the value save() will actually store, so a
+        # date move that resyncs an auto-derived cutoff isn't rejected.
+        if self.start_date and self.booking_cutoff_datetime:
+            effective = self._resolved_cutoff()
+            if timezone.localdate(effective) > self.start_date:
+                raise ValidationError(
+                    {
+                        "booking_cutoff_datetime": (
+                            "Cutoff is after the departure date "
+                            f"({self.start_date}) — bookings would stay open "
+                            "during the voyage."
+                        )
+                    }
+                )
+
+    @staticmethod
+    def cutoff_default_for(start_date):
+        """Noon (Asia/Dhaka) the day before the given start date — PRD §5.5."""
+        naive = datetime.combine(start_date - timedelta(days=1), time(12, 0))
+        return timezone.make_aware(naive, timezone.get_default_timezone())
 
     def default_cutoff(self):
-        """Noon (Asia/Dhaka) the day before the tour starts — PRD §5.5."""
-        naive = datetime.combine(self.start_date - timedelta(days=1), time(12, 0))
-        return timezone.make_aware(naive, timezone.get_default_timezone())
+        return self.cutoff_default_for(self.start_date)
+
+    def _resolved_cutoff(self):
+        """The cutoff save() will store for the current field values.
+
+        Blank derives from the start date. On update, a cutoff that was still
+        the auto-derived default for the *previous* start date (i.e. never
+        hand-picked) follows the dates when they move; a manually customized
+        cutoff is kept as-is.
+        """
+        if self.booking_cutoff_datetime is None:
+            return self.default_cutoff()
+        if self.pk:
+            prev = (
+                Package.objects.filter(pk=self.pk)
+                .values("start_date", "booking_cutoff_datetime")
+                .first()
+            )
+            if (
+                prev
+                and prev["start_date"] != self.start_date
+                and prev["booking_cutoff_datetime"]
+                == self.cutoff_default_for(prev["start_date"])
+            ):
+                return self.default_cutoff()
+        return self.booking_cutoff_datetime
 
     def save(self, *args, **kwargs):
         if self.start_date:
-            if self.booking_cutoff_datetime is None:
-                # First save (or explicitly cleared) — derive from start date.
-                self.booking_cutoff_datetime = self.default_cutoff()
-            elif self.pk:
-                # On update: if the cutoff was still the auto-derived value for
-                # the *previous* start date (i.e. never hand-picked), keep it in
-                # sync when the dates move. A manually customized cutoff — one
-                # that differs from its date's default — is left untouched.
-                prev = (
-                    Package.objects.filter(pk=self.pk)
-                    .values("start_date", "booking_cutoff_datetime")
-                    .first()
-                )
-                if prev and prev["start_date"] != self.start_date:
-                    prev_default = timezone.make_aware(
-                        datetime.combine(
-                            prev["start_date"] - timedelta(days=1), time(12, 0)
-                        ),
-                        timezone.get_default_timezone(),
-                    )
-                    if prev["booking_cutoff_datetime"] == prev_default:
-                        self.booking_cutoff_datetime = self.default_cutoff()
+            self.booking_cutoff_datetime = self._resolved_cutoff()
         super().save(*args, **kwargs)
 
     def is_bookable(self):
@@ -177,6 +201,11 @@ class Package(models.Model):
             and self.is_booking_open
             and self.booking_cutoff_datetime is not None
             and timezone.now() < self.booking_cutoff_datetime
+            # Backstop for a mis-set cutoff: never sell a departed voyage,
+            # whatever the cutoff says. Day-of sales (an admin extending the
+            # cutoff to departure morning) stay possible.
+            and self.start_date is not None
+            and timezone.localdate() <= self.start_date
         )
 
     is_bookable.boolean = True

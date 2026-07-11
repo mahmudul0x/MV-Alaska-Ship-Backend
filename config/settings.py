@@ -188,6 +188,12 @@ FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:5173")
 # Unpaid PENDING bookings are auto-cancelled after this hold window.
 BOOKING_HOLD_MINUTES = env.int("BOOKING_HOLD_MINUTES", default=30)
 
+# How long an initiated (PENDING) gateway payment protects its booking from
+# hold expiry — clicking "pay" extends the hold so the room can't be resold
+# out from under a customer who is still at the SSLCommerz checkout page.
+# Must be >= the gateway's own session lifetime.
+PAYMENT_SESSION_MINUTES = env.int("PAYMENT_SESSION_MINUTES", default=30)
+
 
 # Email — provider-agnostic SMTP config, everything from .env.
 # Dev default prints emails to the console; production sets a real backend.

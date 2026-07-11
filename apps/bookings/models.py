@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q, Sum
 
 from apps.packages.models import Package, PackageRoom
@@ -144,17 +144,30 @@ class Booking(models.Model):
 
     def refresh_paid_amount(self):
         """Recompute paid/due from successful payments (never incremented) and
-        move the booking through the payment statuses."""
-        paid = self.payments.filter(status=Payment.Status.SUCCESS).aggregate(
-            total=Sum("amount")
-        )["total"] or Decimal("0.00")
-        self.paid_amount = paid
-        if self.status not in (self.Status.CANCELLED, self.Status.COMPLETED):
-            if paid >= self.total_amount and paid > 0:
-                self.status = self.Status.FULLY_PAID
-            elif paid > 0:
-                self.status = self.Status.PARTIALLY_PAID
-        self.save(update_fields=["paid_amount", "due_amount", "status", "updated_at"])
+        move the booking through the payment statuses.
+
+        Runs under a lock on the booking row: two payments settling in
+        overlapping transactions would otherwise each SUM before the other
+        commits (READ COMMITTED), and the last writer would record only its
+        own amount — settled money vanishing from paid_amount."""
+        with transaction.atomic():
+            booking = Booking.objects.select_for_update().get(pk=self.pk)
+            paid = booking.payments.filter(status=Payment.Status.SUCCESS).aggregate(
+                total=Sum("amount")
+            )["total"] or Decimal("0.00")
+            booking.paid_amount = paid
+            if booking.status not in (self.Status.CANCELLED, self.Status.COMPLETED):
+                if paid >= booking.total_amount and paid > 0:
+                    booking.status = self.Status.FULLY_PAID
+                elif paid > 0:
+                    booking.status = self.Status.PARTIALLY_PAID
+            booking.save(
+                update_fields=["paid_amount", "due_amount", "status", "updated_at"]
+            )
+            # Keep the caller's instance in sync with what was persisted.
+            self.paid_amount = booking.paid_amount
+            self.due_amount = booking.due_amount
+            self.status = booking.status
 
 
 class BookingStatusLog(models.Model):

@@ -5,9 +5,11 @@ is_booking_open, customer data across bookings) because every staff endpoint
 sits behind IsAdminUser.
 """
 
+from django.db import IntegrityError, transaction
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from apps.bookings.exceptions import RoomUnavailable
 from apps.bookings.models import Booking, BookingStatusLog, Invoice, Payment
 from apps.bookings.serializers import BookingCreateSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
@@ -155,15 +157,44 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         def value(field):
             return attrs.get(field, getattr(self.instance, field, None))
 
+        ship = value("ship")
         package = Package(
-            ship=value("ship"),
+            ship=ship,
             start_date=value("start_date"),
             end_date=value("end_date"),
             status=value("status") or Package.Status.DRAFT,
+            booking_cutoff_datetime=value("booking_cutoff_datetime"),
         )
         if self.instance:
             package.pk = self.instance.pk
         package.clean()
+
+        # Moving a package to another ship would leave the old ship's rooms
+        # attached: the public rooms endpoint would sell cabins that are not
+        # on the sailing vessel, and existing bookings would point at rooms
+        # the guide can't find on board.
+        if self.instance and ship and self.instance.ship_id != ship.id:
+            if (
+                self.instance.bookings.exclude(status=Booking.Status.CANCELLED)
+                .exists()
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "ship": (
+                            "This package has active bookings — it cannot be "
+                            "moved to another ship."
+                        )
+                    }
+                )
+            if self.instance.package_rooms.exclude(room__ship=ship).exists():
+                raise serializers.ValidationError(
+                    {
+                        "ship": (
+                            "Attached rooms belong to the current ship. Detach "
+                            "them (or regenerate rooms) before changing the ship."
+                        )
+                    }
+                )
         return attrs
 
 
@@ -223,22 +254,76 @@ class StaffBookingUpdateSerializer(serializers.ModelSerializer):
         model = Booking
         fields = ["status", "customer_name", "phone", "email"]
 
+    def validate(self, attrs):
+        # Un-cancelling re-occupies the room — reject cleanly if it was
+        # resold in the meantime, instead of letting the partial unique
+        # index (package, room, not-cancelled) 500 on the UPDATE.
+        new_status = attrs.get("status")
+        if (
+            new_status
+            and new_status != Booking.Status.CANCELLED
+            and self.instance
+            and self.instance.status == Booking.Status.CANCELLED
+        ):
+            conflict = (
+                Booking.objects.filter(
+                    package_id=self.instance.package_id,
+                    room_id=self.instance.room_id,
+                )
+                .exclude(status=Booking.Status.CANCELLED)
+                .exclude(pk=self.instance.pk)
+                .first()
+            )
+            if conflict:
+                raise serializers.ValidationError(
+                    {
+                        "status": (
+                            f"Room {self.instance.room.room_number} is already "
+                            f"held by {conflict.booking_code} on this package — "
+                            "this booking cannot be reactivated."
+                        )
+                    }
+                )
+        return attrs
+
     def update(self, instance, validated_data):
         for field, value in validated_data.items():
             setattr(instance, field, value)
-        instance.save(changed_by=self.context["request"].user)
+        try:
+            with transaction.atomic():
+                instance.save(changed_by=self.context["request"].user)
+        except IntegrityError:
+            # Lost the un-cancel race despite the validate() check above.
+            raise RoomUnavailable()
         return instance
 
 
 class StaffBookingCreateSerializer(BookingCreateSerializer):
     """Manual booking from the dashboard — same validation as the public
     API except the cutoff check (staff may book past cutoff, PRD §5.5),
-    and any package is selectable (not just publicly visible ones)."""
+    and non-public packages (CLOSED, past cutoff) are selectable too.
+
+    DRAFT and CANCELLED packages stay off-limits: they are exempt from the
+    ship-date overlap constraint, so a booking on one can sell the same
+    physical room twice for the same night."""
 
     enforce_cutoff = False
     package_id = serializers.PrimaryKeyRelatedField(
         queryset=Package.objects.all(), source="package"
     )
+
+    def validate(self, attrs):
+        package = attrs["package"]
+        if package.status in (Package.Status.DRAFT, Package.Status.CANCELLED):
+            raise serializers.ValidationError(
+                {
+                    "package_id": (
+                        f"Cannot create a booking on a "
+                        f"{package.get_status_display().lower()} package."
+                    )
+                }
+            )
+        return super().validate(attrs)
 
 
 class StaffInvoiceSerializer(serializers.ModelSerializer):

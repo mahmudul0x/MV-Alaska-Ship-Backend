@@ -108,22 +108,29 @@ class BookingCreateSerializer(BookingQuoteSerializer):
     def create(self, validated_data):
         kid_details = [dict(kid) for kid in validated_data.pop("kid_details", [])]
         booking = Booking(kid_details=kid_details, **validated_data)
-        try:
-            with transaction.atomic():
-                # clean() re-validates pax/availability and computes the total
-                # server-side; the partial unique constraint is the final
-                # double-booking guard for true races.
-                booking.full_clean()
-                booking.save()
-        except IntegrityError:
-            raise RoomUnavailable()
-        except DjangoValidationError as exc:
-            if "uniq_active_booking_per_package_room" in str(exc):
+        # Two insert attempts: a booking_code collision (two concurrent
+        # requests drawing the same random code, ~2^-32) must be retried
+        # with a fresh code — not misreported as a lost room race.
+        for retry_left in (True, False):
+            try:
+                with transaction.atomic():
+                    # clean() re-validates pax/availability and computes the
+                    # total server-side; the partial unique constraint is the
+                    # final double-booking guard for true races.
+                    booking.full_clean()
+                    booking.save()
+                return booking
+            except IntegrityError as exc:
+                if "booking_code" in str(exc) and retry_left:
+                    booking.booking_code = ""  # regenerated on the next save
+                    continue
                 raise RoomUnavailable()
-            raise serializers.ValidationError(
-                getattr(exc, "message_dict", None) or exc.messages
-            )
-        return booking
+            except DjangoValidationError as exc:
+                if "uniq_active_booking_per_package_room" in str(exc):
+                    raise RoomUnavailable()
+                raise serializers.ValidationError(
+                    getattr(exc, "message_dict", None) or exc.messages
+                )
 
 
 class PaymentInitiateSerializer(serializers.Serializer):

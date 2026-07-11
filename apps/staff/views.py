@@ -8,6 +8,7 @@ from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
@@ -190,7 +191,11 @@ class StaffBookingViewSet(viewsets.ModelViewSet):
         )
         params = self.request.query_params
         if params.get("package"):
-            qs = qs.filter(package_id=params["package"])
+            try:
+                qs = qs.filter(package_id=int(params["package"]))
+            except ValueError:
+                # Non-numeric filter would ValueError inside the ORM → 500.
+                raise ValidationError({"package": "Must be a package id."})
         if params.get("status"):
             qs = qs.filter(status=params["status"])
         if params.get("search"):
