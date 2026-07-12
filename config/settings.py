@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,6 +24,32 @@ SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
 
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
+
+# Fail-safe: never boot a deployed environment with DEBUG on. DEBUG=True leaks
+# tracebacks with SECRET_KEY/DB DSN/settings on any 500, and turns off every
+# hardening flag below. Railway sets RAILWAY_ENVIRONMENT on every deploy; if we
+# see that marker with DEBUG still on, refuse to start rather than silently
+# serve insecure. Local dev has no such marker, so DEBUG=True stays fine there.
+if DEBUG and env("RAILWAY_ENVIRONMENT", default=""):
+    raise ImproperlyConfigured(
+        "DEBUG must be False in a deployed environment (RAILWAY_ENVIRONMENT is "
+        "set). Set DEBUG=False on the Railway service before deploying."
+    )
+
+
+# Production transport/cookie hardening. Only active when DEBUG is off, so local
+# dev (DEBUG=True, plain HTTP) is unaffected. Railway terminates TLS at its edge
+# and forwards X-Forwarded-Proto, so SECURE_PROXY_SSL_HEADER lets Django see the
+# request as HTTPS and enforce the redirect/secure-cookie flags correctly.
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
 
 
 # Application definition
@@ -152,6 +179,10 @@ REST_FRAMEWORK = {
         # Live price previews (quote) — fired per guest-count change in the
         # wizard, so far looser than actual booking creation.
         "quote": "60/min",
+        # Staff login + token refresh: tight bucket to blunt credential
+        # stuffing / password spraying against the admin dashboard. Keyed on
+        # the real client IP (NUM_PROXIES set below), not a spoofable header.
+        "login": "5/min",
     },
     # Trusted proxy hop count for throttling. Without it DRF keys throttle
     # buckets on the raw client-supplied X-Forwarded-For header, which lets
@@ -198,6 +229,12 @@ FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:5173")
 
 # Unpaid PENDING bookings are auto-cancelled after this hold window.
 BOOKING_HOLD_MINUTES = env.int("BOOKING_HOLD_MINUTES", default=30)
+
+# Authority helpline numbers printed on the guide report & customer invoice
+# (comma-separated). Change these without touching code.
+AUTHORITY_PHONES = env(
+    "AUTHORITY_PHONES", default="01712-823482,01831-694307,01342-919795"
+)
 
 # The gateway session lifetime: once a PENDING payment is older than this
 # AND SSLCommerz's Transaction Query API reports no payment attempt on it,

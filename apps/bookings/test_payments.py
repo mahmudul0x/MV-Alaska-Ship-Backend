@@ -387,3 +387,62 @@ class ExpireStaleBookingsTests(PaymentTestCase):
             booking, {"payment_type": "partial", "amount": amount}
         )
         return Payment.objects.get(transaction_id=response.data["tran_id"])
+
+
+class GatewayCardDataStrippingTests(APITestCase):
+    """Cardholder data must never reach Payment.gateway_payload / the staff API
+    (Phase 8a, F4). Verified at the real gateway boundary: mock only the HTTP
+    round-trip, so the stripping in validate_payment/query_transaction runs."""
+
+    def test_validate_payment_strips_card_fields(self):
+        raw = {
+            "status": "VALID",
+            "tran_id": "BK-DEADBEEF-P1",
+            "val_id": "VAL123",
+            "amount": "9500.00",
+            "currency": "BDT",
+            # Cardholder data SSLCommerz returns — must be dropped.
+            "card_no": "418117XXXXXX5075",
+            "card_issuer": "BRAC BANK",
+            "card_brand": "VISA",
+            "card_type": "VISA-Dutch Bangla",
+        }
+        with patch("apps.bookings.sslcommerz.requests.get") as mock_get:
+            mock_get.return_value.json.return_value = raw
+            mock_get.return_value.raise_for_status.return_value = None
+            from apps.bookings import sslcommerz
+
+            data = sslcommerz.validate_payment("VAL123")
+
+        # Operational fields the verdict check relies on survive untouched...
+        for key in ("status", "tran_id", "val_id", "amount", "currency"):
+            self.assertEqual(data[key], raw[key])
+        # ...card fields are gone.
+        for key in ("card_no", "card_issuer", "card_brand", "card_type"):
+            self.assertNotIn(key, data)
+
+    def test_query_transaction_strips_card_fields_from_each_attempt(self):
+        raw = {
+            "APIConnect": "DONE",
+            "no_of_trans_found": 1,
+            "element": {
+                "status": "VALID",
+                "tran_id": "BK-DEADBEEF-P1",
+                "val_id": "VAL123",
+                "amount": "9500.00",
+                "currency": "BDT",
+                "card_no": "418117XXXXXX5075",
+                "card_issuer": "BRAC BANK",
+            },
+        }
+        with patch("apps.bookings.sslcommerz.requests.get") as mock_get:
+            mock_get.return_value.json.return_value = raw
+            mock_get.return_value.raise_for_status.return_value = None
+            from apps.bookings import sslcommerz
+
+            attempts = sslcommerz.query_transaction("BK-DEADBEEF-P1")
+
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["status"], "VALID")
+        self.assertNotIn("card_no", attempts[0])
+        self.assertNotIn("card_issuer", attempts[0])

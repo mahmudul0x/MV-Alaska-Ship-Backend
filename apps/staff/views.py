@@ -12,9 +12,10 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from apps.bookings import invoices, payment_service
 from apps.bookings.models import Booking, Invoice, Payment
@@ -37,6 +38,7 @@ from .serializers import (
     StaffPaymentSerializer,
     StaffRoomSerializer,
     StaffRoomTypeSerializer,
+    StaffShipSerializer,
     StaffTokenObtainPairSerializer,
 )
 
@@ -49,6 +51,19 @@ class StaffPagination(PageNumberPagination):
 
 class StaffLoginView(TokenObtainPairView):
     serializer_class = StaffTokenObtainPairSerializer
+    # Tight per-IP throttle (5/min) to blunt credential stuffing / password
+    # spraying against the admin dashboard — the default anon bucket (100/min)
+    # is far too loose for a login oracle.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+
+class StaffTokenRefreshView(TokenRefreshView):
+    """Same tight throttle as login: a refresh token is a credential too, and
+    this endpoint should not be a brute-force bypass around the login limit."""
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
 
 
 class StaffLogoutView(APIView):
@@ -371,6 +386,20 @@ class StaffPaymentViewSet(
         transaction.on_commit(
             lambda: invoices.create_and_send_invoice(booking, payment=payment)
         )
+
+
+class StaffShipViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Read + edit ship settings (helpline numbers). Ships are created via the
+    seed migration / Django admin, so no create or delete here."""
+
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffShipSerializer
+    queryset = Ship.objects.all().order_by("name")
 
 
 class StaffRoomTypeViewSet(viewsets.ModelViewSet):

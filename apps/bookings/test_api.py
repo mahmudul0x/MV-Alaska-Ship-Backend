@@ -23,6 +23,7 @@ BOOKING_PUBLIC_FIELDS = {
     "email",
     "adult_count",
     "kid_details",
+    "special_requests",
     "total_amount",
     "paid_amount",
     "due_amount",

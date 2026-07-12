@@ -15,6 +15,35 @@ class GatewayError(Exception):
     """Session creation or validation could not be completed."""
 
 
+#: Cardholder-data fields SSLCommerz returns that we neither use nor want to
+#: persist. The PAN is already masked by the gateway (PCI), but we still keep no
+#: card data at rest: it is surfaced to every staff user via the payment API and
+#: the dashboard needs none of it. Verification (_verdict_is_valid) reads only
+#: status/tran_id/currency/amount, so dropping these cannot affect crediting
+#: (Phase 8a, F4).
+_CARD_DATA_FIELDS = frozenset(
+    {
+        "card_no",
+        "card_issuer",
+        "card_brand",
+        "card_sub_brand",
+        "card_type",
+        "card_category",
+        "card_issuer_country",
+        "card_issuer_country_code",
+    }
+)
+
+
+def _strip_card_fields(data):
+    """Return a copy of a gateway response dict with cardholder-data fields
+    removed. Non-dicts pass through unchanged. Applied at the gateway boundary
+    so card data never reaches Payment.gateway_payload or the staff API."""
+    if not isinstance(data, dict):
+        return data
+    return {key: value for key, value in data.items() if key not in _CARD_DATA_FIELDS}
+
+
 def create_session(payment):
     """Create a gateway checkout session; returns the GatewayPageURL."""
     booking = payment.booking
@@ -68,7 +97,7 @@ def validate_payment(val_id):
         timeout=30,
     )
     response.raise_for_status()
-    return response.json()
+    return _strip_card_fields(response.json())
 
 
 def query_transaction(tran_id):
@@ -98,7 +127,8 @@ def query_transaction(tran_id):
         return []
     element = data.get("element") or []
     # The API returns a bare object when exactly one attempt exists.
-    return [element] if isinstance(element, dict) else list(element)
+    attempts = [element] if isinstance(element, dict) else list(element)
+    return [_strip_card_fields(attempt) for attempt in attempts]
 
 
 def verify_ipn_signature(data):

@@ -44,6 +44,7 @@ class ThrottlelessTestMixin:
             "anon": None,
             "booking": None,
             "quote": None,
+            "login": None,
         }
 
     @classmethod

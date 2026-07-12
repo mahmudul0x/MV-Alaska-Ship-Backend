@@ -20,11 +20,6 @@ ZEBRA = (247, 249, 251)
 GREY = (105, 115, 125)
 RULE = (210, 216, 222)
 
-#: Authority contact numbers, printed in the report header so the guide (and
-#: anyone holding the sheet) can reach the office. Kept here as data, not baked
-#: into a string, so they are easy to update.
-AUTHORITY_PHONES = ["01712-823482", "01831-694307", "01342-919795"]
-
 
 def generate_guide_report_pdf(package):
     bookings = (
@@ -62,10 +57,14 @@ def generate_guide_report_pdf(package):
     )
 
     # Authority contact numbers — top-right corner, under the tour dates.
-    pdf.set_font("NotoSans", "", 7.5)
-    pdf.set_text_color(*GREY)
-    pdf.set_xy(pdf.l_margin + epw / 2, 18)
-    pdf.cell(epw / 2, 4, "Helpline: " + "  ·  ".join(AUTHORITY_PHONES), align="R")
+    # Per-ship, editable from the staff dashboard (falls back to the system
+    # default). Skip the line entirely if none are configured.
+    phones = package.ship.authority_phone_list
+    if phones:
+        pdf.set_font("NotoSans", "", 7.5)
+        pdf.set_text_color(*GREY)
+        pdf.set_xy(pdf.l_margin + epw / 2, 18)
+        pdf.cell(epw / 2, 4, "Helpline: " + "  ·  ".join(phones), align="R")
 
     pdf.set_draw_color(*NAVY)
     pdf.set_line_width(0.5)

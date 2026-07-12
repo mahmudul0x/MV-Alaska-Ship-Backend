@@ -94,6 +94,13 @@ class BookingCreateSerializer(BookingQuoteSerializer):
     customer_name = serializers.CharField(max_length=100)
     phone = serializers.CharField(max_length=20)
     email = serializers.EmailField()
+    # Optional free-text note. Bounded here (not just on the model's TextField)
+    # because this endpoint is anonymous — an uncapped field would let anyone
+    # push arbitrarily large rows into the DB. allow_blank so an empty box is
+    # simply "no request", not a validation error.
+    special_requests = serializers.CharField(
+        max_length=1000, required=False, allow_blank=True, default=""
+    )
 
     def create(self, validated_data):
         kid_details = [dict(kid) for kid in validated_data.pop("kid_details", [])]
@@ -246,6 +253,7 @@ class BookingPublicSerializer(serializers.ModelSerializer):
             "email",
             "adult_count",
             "kid_details",
+            "special_requests",
             "total_amount",
             "paid_amount",
             "due_amount",

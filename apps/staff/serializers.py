@@ -16,7 +16,7 @@ from apps.bookings.exceptions import RoomUnavailable
 from apps.bookings.models import Booking, BookingStatusLog, Invoice, Payment
 from apps.bookings.serializers import BookingCreateSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
-from apps.ships.models import FoodMenuItem, Room, RoomType
+from apps.ships.models import FoodMenuItem, Room, RoomType, Ship
 
 
 class StaffTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -35,6 +35,35 @@ class StaffTokenObtainPairSerializer(TokenObtainPairSerializer):
             "is_staff": self.user.is_staff,
         }
         return data
+
+
+class StaffShipSerializer(serializers.ModelSerializer):
+    """Ship settings the dashboard can edit — currently the helpline numbers
+    printed on the guide report & customer invoices. `authority_phone_list` is
+    the resolved list actually used by the PDFs (ship numbers, or the system
+    default when the ship's field is blank)."""
+
+    authority_phone_list = serializers.ListField(
+        child=serializers.CharField(), read_only=True
+    )
+
+    class Meta:
+        model = Ship
+        fields = ["id", "name", "status", "authority_phones", "authority_phone_list"]
+        read_only_fields = ["name", "status"]
+
+    def validate_authority_phones(self, value):
+        # Stored comma-separated. Normalise spacing so the PDF renders cleanly
+        # and two lists that differ only in whitespace compare equal.
+        numbers = [n.strip() for n in value.split(",") if n.strip()]
+        for n in numbers:
+            # Keep it permissive (formats vary: 01712-823482, +8801…), but
+            # reject anything with no digit at all — almost always a typo.
+            if not any(ch.isdigit() for ch in n):
+                raise serializers.ValidationError(
+                    f"'{n}' does not look like a phone number."
+                )
+        return ", ".join(numbers)
 
 
 class StaffRoomTypeSerializer(serializers.ModelSerializer):
@@ -330,7 +359,7 @@ class StaffBookingListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "booking_code", "customer_name", "phone", "email",
             "package", "package_title", "room", "room_number",
-            "adult_count", "kid_details", "total_pax",
+            "adult_count", "kid_details", "total_pax", "special_requests",
             "total_amount", "paid_amount", "due_amount", "status",
             "refund_required", "refund_note", "created_at",
         ]
@@ -353,11 +382,17 @@ class StaffBookingUpdateSerializer(serializers.ModelSerializer):
     stay consistent. refund_required/refund_note let staff clear the flag
     once the customer has actually been refunded (with a note saying how)."""
 
+    # Same 1000-char cap as the public create path, so an edited request can't
+    # grow past what a customer could originally submit.
+    special_requests = serializers.CharField(
+        max_length=1000, required=False, allow_blank=True
+    )
+
     class Meta:
         model = Booking
         fields = [
             "status", "customer_name", "phone", "email",
-            "refund_required", "refund_note",
+            "special_requests", "refund_required", "refund_note",
         ]
 
     def validate(self, attrs):

@@ -14,9 +14,14 @@ from .pricing import price_breakdown, snapshot_breakdown
 
 
 def generate_booking_code():
-    """Unique human-readable code; also the SSLCommerz tran_id base (Phase 4)."""
+    """Unique human-readable code; also the SSLCommerz tran_id base (Phase 4).
+
+    64 bits of entropy (token_hex(8) → 16 hex chars). This is the sole
+    authorization token for a customer's own booking on the unauthenticated
+    public API, so it must be broad enough that neither targeted guessing nor a
+    birthday-style sweep is feasible (Phase 8a, F3 — was 32 bits)."""
     while True:
-        code = "BK-" + secrets.token_hex(4).upper()
+        code = "BK-" + secrets.token_hex(8).upper()
         if not Booking.objects.filter(booking_code=code).exists():
             return code
 
@@ -43,6 +48,12 @@ class Booking(models.Model):
         blank=True,
         help_text='List of kids as [{"age": 5}, ...]. Ages drive kid pricing.',
     )
+    # Customer's free-text note captured in the booking wizard (dietary needs,
+    # accessibility, anniversary, etc.). Optional; surfaced to staff and the
+    # guide. Length is bounded at the serializer (1000 chars) — this is the
+    # only free-text field on the anonymous booking endpoint, so it must not be
+    # an unbounded-text vector.
+    special_requests = models.TextField(blank=True)
     total_amount = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal("0.00")
     )

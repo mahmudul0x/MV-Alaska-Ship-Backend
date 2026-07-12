@@ -33,10 +33,6 @@ logger = logging.getLogger(__name__)
 
 FONTS_DIR = settings.BASE_DIR / "assets" / "fonts"
 
-#: Authority contact numbers, printed in the invoice header so the customer can
-#: reach the office. Data, not a baked-in string, so they are easy to update.
-AUTHORITY_PHONES = ["01712-823482", "01831-694307", "01342-919795"]
-
 #: Booking states an invoice may be issued for. An invoice attests to money
 #: received: a booking with nothing paid has nothing to attest to, and a
 #: cancelled booking's money is owed back, not collected (QA M3).
@@ -507,9 +503,13 @@ def generate_invoice_pdf(invoice):
     pdf.cell(epw / 2 - 29, 6, "Ship Tour Package Booking")
     pdf.cell(epw / 2, 6, invoice.number, align="R")
     # Authority contact numbers — top-right corner, under the invoice number.
-    pdf.set_font("NotoSans", "", 7.5)
-    pdf.set_xy(text_x, 24)
-    pdf.cell(epw - 29, 4, "Helpline: " + "  ·  ".join(AUTHORITY_PHONES), align="R")
+    # Per-ship, editable from the staff dashboard (falls back to the system
+    # default). Skip the line entirely if none are configured.
+    phones = package.ship.authority_phone_list
+    if phones:
+        pdf.set_font("NotoSans", "", 7.5)
+        pdf.set_xy(text_x, 24)
+        pdf.cell(epw - 29, 4, "Helpline: " + "  ·  ".join(phones), align="R")
     pdf.set_draw_color(*NAVY)
     pdf.set_line_width(0.5)
     pdf.line(pdf.l_margin, 34, pdf.l_margin + epw, 34)

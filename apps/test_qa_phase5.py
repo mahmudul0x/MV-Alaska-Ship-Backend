@@ -782,27 +782,28 @@ class DueDeadlineTests(PaymentQABase):
         self.package.booking_cutoff_datetime = timezone.now() + timedelta(hours=1)
         self.package.save()
 
-    def test_14_overdue_balance_cancels_and_flags_the_deposit(self):
-        """H2 fix: enforce_due_deadlines cancels partially paid bookings past
-        the (admin-configurable) balance deadline, freeing the room and
-        flagging the held deposit for the manual refund/forfeit call."""
+    def test_14_overdue_balance_is_never_auto_cancelled(self):
+        """H6 (client ruling): the balance may be settled any time before the
+        journey, so enforce_due_deadlines must NEVER cancel a deposit-paid
+        booking or free its cabin. Any balance still owed at sailing is
+        collected on board by the guide. It only ever reminds."""
         from django.core.management import get_commands
 
         self.assertIn("enforce_due_deadlines", get_commands())
 
         b = self.make_booking()
         self.settle(self.pay(b, "partial", "5000.00"))
-        # Departure is tomorrow; the deadline (noon, 3 days before) passed.
+        # Departure is tomorrow; the old deadline (noon, 3 days before) passed.
         self._move_package(start_in_days=1)
         call_command("enforce_due_deadlines", verbosity=0)
         b.refresh_from_db()
-        self.assertEqual(b.status, Booking.Status.CANCELLED)
-        self.assertEqual(b.paid_amount, Decimal("5000.00"))  # deposit tracked
-        self.assertEqual(b.due_amount, Decimal("0.00"))
-        self.assertTrue(b.refund_required)
-        self.assertIn("cancellation-charge", b.refund_note)
+        # Booking stands, deposit intact, nothing owed back — cabin still held.
+        self.assertEqual(b.status, Booking.Status.PARTIALLY_PAID)
+        self.assertEqual(b.paid_amount, Decimal("5000.00"))
+        self.assertEqual(b.due_amount, Decimal("4500.00"))
+        self.assertFalse(b.refund_required)
 
-        # The room is genuinely reclaimable.
+        # The room is NOT on public sale — the customer still holds it.
         r = self.client.post(
             "/api/bookings/",
             {
@@ -815,7 +816,7 @@ class DueDeadlineTests(PaymentQABase):
             },
             format="json",
         )
-        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.status_code, 409, r.data)  # room still unavailable
 
     def test_14b_reminder_email_goes_out_once_before_the_deadline(self):
         b = self.make_booking()

@@ -483,3 +483,62 @@ class StaffOverviewTests(StaffApiTestCase):
         )
         self.assertEqual(by_ship["Second Ship"]["active_bookings"], 1)
         self.assertEqual(by_ship["Second Ship"]["paid_total"], Decimal("0.00"))
+
+
+class StaffLoginThrottleTests(APITestCase):
+    """Brute-force guard on the staff login endpoint (Phase 8a, F2).
+
+    Deliberately does NOT use ThrottlelessTestMixin — the whole point is to let
+    the real "login": "5/min" rate apply. The throttle counter lives in the
+    cache, so clear it before and after so this class can't leak 429s into
+    other tests (or inherit them)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.staff = User.objects.create_user(
+            username="staffer", password="pass12345", is_staff=True
+        )
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def tearDown(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def test_sixth_login_attempt_within_a_minute_is_throttled(self):
+        # Wrong password on purpose: throttling must count *attempts*, so a
+        # brute-forcer can't keep guessing. The first five are answered
+        # normally (401 here), the sixth is refused with 429.
+        for i in range(5):
+            response = self.client.post(
+                "/api/staff/login/",
+                {"username": "staffer", "password": "wrong-guess"},
+            )
+            self.assertNotEqual(
+                response.status_code, 429, f"attempt {i + 1} should not be throttled"
+            )
+        sixth = self.client.post(
+            "/api/staff/login/",
+            {"username": "staffer", "password": "wrong-guess"},
+        )
+        self.assertEqual(sixth.status_code, 429)
+
+    def test_correct_credentials_also_throttled_after_the_limit(self):
+        # The limit is on the endpoint, not on failures — five attempts spent
+        # guessing means even a now-correct 6th try is refused until the window
+        # resets. This is what stops an attacker who lands the password on
+        # guess six from immediately using it.
+        for _ in range(5):
+            self.client.post(
+                "/api/staff/login/",
+                {"username": "staffer", "password": "wrong-guess"},
+            )
+        blocked = self.client.post(
+            "/api/staff/login/",
+            {"username": "staffer", "password": "pass12345"},
+        )
+        self.assertEqual(blocked.status_code, 429)

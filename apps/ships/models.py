@@ -11,6 +11,15 @@ class Ship(models.Model):
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.ACTIVE
     )
+    #: Helpline numbers printed on this ship's guide report & customer invoices,
+    #: comma-separated. Editable from the staff dashboard; when blank the PDFs
+    #: fall back to settings.AUTHORITY_PHONES. Per-ship so each ship can carry
+    #: its own contact numbers.
+    authority_phones = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Helpline numbers for the report/invoice header, comma-separated.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -20,6 +29,18 @@ class Ship(models.Model):
     @property
     def total_rooms(self):
         return self.rooms.count()
+
+    @property
+    def authority_phone_list(self):
+        """The ship's helpline numbers as a clean list, falling back to the
+        system default (settings.AUTHORITY_PHONES) when none are set — so a
+        report/invoice never prints an empty helpline line."""
+        from django.conf import settings
+
+        raw = self.authority_phones or getattr(
+            settings, "AUTHORITY_PHONES", ""
+        )
+        return [n.strip() for n in raw.split(",") if n.strip()]
 
 
 class RoomType(models.Model):

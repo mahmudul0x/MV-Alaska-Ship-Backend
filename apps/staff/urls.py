@@ -1,6 +1,5 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
     StaffBookingViewSet,
@@ -14,9 +13,12 @@ from .views import (
     StaffPaymentViewSet,
     StaffRoomTypeViewSet,
     StaffRoomViewSet,
+    StaffShipViewSet,
+    StaffTokenRefreshView,
 )
 
 router = DefaultRouter()
+router.register("ships", StaffShipViewSet, basename="staff-ship")
 router.register("packages", StaffPackageViewSet, basename="staff-package")
 router.register("bookings", StaffBookingViewSet, basename="staff-booking")
 router.register("payments", StaffPaymentViewSet, basename="staff-payment")
@@ -28,7 +30,7 @@ router.register("invoices", StaffInvoiceViewSet, basename="staff-invoice")
 
 urlpatterns = [
     path("login/", StaffLoginView.as_view(), name="staff-login"),
-    path("login/refresh/", TokenRefreshView.as_view(), name="staff-token-refresh"),
+    path("login/refresh/", StaffTokenRefreshView.as_view(), name="staff-token-refresh"),
     path("logout/", StaffLogoutView.as_view(), name="staff-logout"),
     path("overview/", StaffOverviewView.as_view(), name="staff-overview"),
     path("", include(router.urls)),

@@ -10,8 +10,9 @@ class RoomInline(admin.TabularInline):
 
 @admin.register(Ship)
 class ShipAdmin(admin.ModelAdmin):
-    list_display = ("name", "status", "total_rooms")
+    list_display = ("name", "status", "total_rooms", "authority_phones")
     list_filter = ("status",)
+    fields = ("name", "status", "layout_image", "authority_phones")
     inlines = [RoomInline]
 
 

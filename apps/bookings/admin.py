@@ -59,7 +59,15 @@ class BookingAdmin(admin.ModelAdmin):
     inlines = [PaymentInline, BookingStatusLogInline]
     fieldsets = (
         ("Customer", {"fields": ("customer_name", "phone", "email")}),
-        ("Trip", {"fields": ("package", "room", "adult_count", "kid_details")}),
+        (
+            "Trip",
+            {
+                "fields": (
+                    "package", "room", "adult_count", "kid_details",
+                    "special_requests",
+                )
+            },
+        ),
         (
             "Amounts (auto-calculated)",
             {"fields": ("total_amount", "paid_amount", "due_amount")},
