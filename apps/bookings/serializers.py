@@ -2,30 +2,20 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
+from django.urls import reverse
 from rest_framework import serializers
 
 from apps.packages.models import Package, PackageRoom
 from apps.ships.models import Room
 
 from .exceptions import RoomUnavailable
-from .models import Booking, Payment
-from .pricing import price_breakdown
+from .models import Booking, Invoice, Payment
+from .pricing import price_breakdown, snapshot_breakdown
 
-
-def breakdown_as_json(breakdown):
-    """Decimal → string ("11000.00") so DRF's encoder never floats money."""
-    return {
-        "room_base": str(breakdown["room_base"]),
-        "adult_price": str(breakdown["adult_price"]),
-        "adult_count": breakdown["adult_count"],
-        "adults_subtotal": str(breakdown["adults_subtotal"]),
-        "kids": [
-            {"age": kid["age"], "charge": str(kid["charge"])}
-            for kid in breakdown["kids"]
-        ],
-        "kids_subtotal": str(breakdown["kids_subtotal"]),
-        "total": str(breakdown["total"]),
-    }
+#: Decimal → string ("11000.00") so DRF's encoder never floats money. Same
+#: shape the booking stores in price_snapshot, so the API and the invoice can
+#: never disagree about what a breakdown looks like.
+breakdown_as_json = snapshot_breakdown
 
 
 class KidSerializer(serializers.Serializer):
@@ -137,7 +127,12 @@ class PaymentInitiateSerializer(serializers.Serializer):
     """Validates a pay request against the booking's server-side due amount.
 
     full → amount is taken from booking.due_amount, any client amount ignored.
-    partial → client amount required, 0 < amount <= due.
+    partial → client amount required, min_first_payment <= amount <= due
+    (the floor comes from Package.min_deposit_percent and applies only to the
+    booking's FIRST payment; top-ups have no floor).
+
+    These checks are check-then-act UX; initiate_payment() re-verifies all of
+    them under a row lock on the booking.
     """
 
     payment_type = serializers.ChoiceField(choices=Payment.PaymentType.choices)
@@ -146,6 +141,10 @@ class PaymentInitiateSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
+        from django.utils import timezone
+
+        from .payment_service import minimum_first_payment
+
         booking = self.context["booking"]
 
         if booking.status in (Booking.Status.CANCELLED, Booking.Status.COMPLETED):
@@ -155,6 +154,18 @@ class PaymentInitiateSerializer(serializers.Serializer):
         if booking.due_amount <= 0:
             raise serializers.ValidationError(
                 {"payment_type": "Nothing is due on this booking."}
+            )
+        # Balance may be paid any time before departure (client policy, QA H6);
+        # online payment only stops once the ship has sailed, after which the
+        # guide collects any balance on board.
+        if timezone.localdate() > booking.package.start_date:
+            raise serializers.ValidationError(
+                {
+                    "payment_type": (
+                        "This package has already departed — please settle any "
+                        "balance with the guide on board."
+                    )
+                }
             )
 
         if attrs["payment_type"] == Payment.PaymentType.PARTIAL:
@@ -167,9 +178,39 @@ class PaymentInitiateSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {"amount": f"Amount exceeds the due amount ({booking.due_amount})."}
                 )
+            floor = minimum_first_payment(booking)
+            if amount < floor:
+                raise serializers.ValidationError(
+                    {
+                        "amount": (
+                            f"Minimum first payment is {floor} BDT "
+                            f"({booking.package.min_deposit_percent}% of the total)."
+                        )
+                    }
+                )
         else:
             attrs.pop("amount", None)  # full payment: server decides the amount
         return attrs
+
+
+class BookingInvoiceSerializer(serializers.ModelSerializer):
+    """A customer-facing invoice listing. Exposes the download link (bearing
+    the invoice's own capability token) and the figures the invoice states —
+    never another booking's data."""
+
+    download_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Invoice
+        fields = [
+            "number", "total_amount", "paid_amount", "due_amount",
+            "sent_at", "created_at", "download_url",
+        ]
+
+    def get_download_url(self, invoice):
+        url = reverse("invoice-download", kwargs={"token": invoice.access_token})
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
 
 
 class BookingPackageSerializer(serializers.ModelSerializer):
@@ -184,6 +225,14 @@ class BookingPublicSerializer(serializers.ModelSerializer):
 
     package = BookingPackageSerializer(read_only=True)
     room_number = serializers.CharField(source="room.room_number", read_only=True)
+    # The frontend renders the deposit floor from this — it never computes
+    # money client-side.
+    min_first_payment = serializers.SerializerMethodField()
+    # The balance deadline, as a DATE the customer can see — not a policy
+    # phrase. It is enforced server-side at payment time (QA H8); showing it
+    # is what stops them discovering it by being refused.
+    balance_due_at = serializers.SerializerMethodField()
+    balance_deadline_passed = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -200,4 +249,20 @@ class BookingPublicSerializer(serializers.ModelSerializer):
             "total_amount",
             "paid_amount",
             "due_amount",
+            "min_first_payment",
+            "balance_due_at",
+            "balance_deadline_passed",
         ]
+
+    def get_min_first_payment(self, booking):
+        from .payment_service import minimum_first_payment
+
+        return str(minimum_first_payment(booking))
+
+    def get_balance_due_at(self, booking):
+        return booking.package.balance_due_at()
+
+    def get_balance_deadline_passed(self, booking):
+        from .payment_service import balance_deadline_passed
+
+        return balance_deadline_passed(booking)

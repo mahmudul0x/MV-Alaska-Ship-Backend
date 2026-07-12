@@ -20,6 +20,11 @@ ZEBRA = (247, 249, 251)
 GREY = (105, 115, 125)
 RULE = (210, 216, 222)
 
+#: Authority contact numbers, printed in the report header so the guide (and
+#: anyone holding the sheet) can reach the office. Kept here as data, not baked
+#: into a string, so they are easy to update.
+AUTHORITY_PHONES = ["01712-823482", "01831-694307", "01342-919795"]
+
 
 def generate_guide_report_pdf(package):
     bookings = (
@@ -55,6 +60,13 @@ def generate_guide_report_pdf(package):
         f"{package.start_date:%d %b %Y} – {package.end_date:%d %b %Y}",
         align="R", new_x="LMARGIN", new_y="NEXT",
     )
+
+    # Authority contact numbers — top-right corner, under the tour dates.
+    pdf.set_font("NotoSans", "", 7.5)
+    pdf.set_text_color(*GREY)
+    pdf.set_xy(pdf.l_margin + epw / 2, 18)
+    pdf.cell(epw / 2, 4, "Helpline: " + "  ·  ".join(AUTHORITY_PHONES), align="R")
+
     pdf.set_draw_color(*NAVY)
     pdf.set_line_width(0.5)
     pdf.line(pdf.l_margin, 26, pdf.l_margin + epw, 26)
@@ -69,10 +81,11 @@ def generate_guide_report_pdf(package):
     pdf.cell(epw / 2, 6, f"Generated: {generated}", align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
-    # Table header
+    # Table header — Pax is split into Adults and Kids so the guide can see the
+    # party composition per room at a glance (not just a combined count).
     col = {
-        "room": 18, "name": epw - 18 - 34 - 14 - 32 - 32,
-        "phone": 34, "pax": 14, "paid": 32, "due": 32,
+        "room": 16, "name": epw - 16 - 30 - 15 - 15 - 30 - 30,
+        "phone": 30, "adults": 15, "kids": 15, "paid": 30, "due": 30,
     }
     pdf.set_font("NotoSans", "B", 8.5)
     pdf.set_fill_color(*NAVY)
@@ -80,21 +93,25 @@ def generate_guide_report_pdf(package):
     pdf.cell(col["room"], 7, " Room", fill=True)
     pdf.cell(col["name"], 7, " Customer name", fill=True)
     pdf.cell(col["phone"], 7, " Mobile", fill=True)
-    pdf.cell(col["pax"], 7, "Pax", fill=True, align="C")
+    pdf.cell(col["adults"], 7, "Adults", fill=True, align="C")
+    pdf.cell(col["kids"], 7, "Kids", fill=True, align="C")
     pdf.cell(col["paid"], 7, "Paid (BDT) ", fill=True, align="R")
     pdf.cell(col["due"], 7, "Due (BDT) ", fill=True, align="R", new_x="LMARGIN", new_y="NEXT")
 
     # Rows
     total_paid = total_due = Decimal("0.00")
-    total_pax = 0
+    total_adults = total_kids = 0
     pdf.set_font("NotoSans", "", 9)
     pdf.set_text_color(40, 40, 40)
     for i, booking in enumerate(bookings):
+        adults = booking.adult_count
+        kids = len(booking.kid_details)
         pdf.set_fill_color(*(ZEBRA if i % 2 == 0 else (255, 255, 255)))
         pdf.cell(col["room"], 7, f" {booking.room.room_number}", fill=True)
         pdf.cell(col["name"], 7, f" {booking.customer_name}", fill=True)
         pdf.cell(col["phone"], 7, f" {booking.phone}", fill=True)
-        pdf.cell(col["pax"], 7, str(booking.total_pax), fill=True, align="C")
+        pdf.cell(col["adults"], 7, str(adults), fill=True, align="C")
+        pdf.cell(col["kids"], 7, str(kids), fill=True, align="C")
         pdf.cell(col["paid"], 7, f"{booking.paid_amount} ", fill=True, align="R")
         pdf.set_font("NotoSans", "B" if booking.due_amount > 0 else "", 9)
         pdf.cell(col["due"], 7, f"{booking.due_amount} ", fill=True, align="R",
@@ -102,7 +119,8 @@ def generate_guide_report_pdf(package):
         pdf.set_font("NotoSans", "", 9)
         total_paid += booking.paid_amount
         total_due += booking.due_amount
-        total_pax += booking.total_pax
+        total_adults += adults
+        total_kids += kids
 
     if not bookings:
         pdf.set_font("NotoSans", "", 9)
@@ -113,7 +131,8 @@ def generate_guide_report_pdf(package):
     pdf.set_draw_color(*RULE)
     pdf.set_font("NotoSans", "B", 9)
     pdf.cell(col["room"] + col["name"] + col["phone"], 8, " TOTAL", border="T")
-    pdf.cell(col["pax"], 8, str(total_pax), border="T", align="C")
+    pdf.cell(col["adults"], 8, str(total_adults), border="T", align="C")
+    pdf.cell(col["kids"], 8, str(total_kids), border="T", align="C")
     pdf.cell(col["paid"], 8, f"{total_paid} ", border="T", align="R")
     pdf.set_text_color(*NAVY)
     pdf.cell(col["due"], 8, f"{total_due} ", border="T", align="R",

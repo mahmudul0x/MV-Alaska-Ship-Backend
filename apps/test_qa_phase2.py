@@ -29,7 +29,7 @@ from apps.bookings import payment_service
 from apps.bookings.test_api import build_fixtures
 from apps.packages.models import PackageRoom
 from apps.ships.models import Room
-from apps.testing import ThrottlelessTestMixin
+from apps.testing import ThrottlelessTestMixin, sign_ipn
 
 GATEWAY_URL = "https://sandbox.sslcommerz.com/gwprocess/qa-phase2"
 
@@ -284,16 +284,12 @@ class ExpiryVsSettlementClobberTests(ThrottlelessTestMixin, TransactionTestCase)
         # exist yet when the cron evaluates its queryset.
         now = timezone.now()
         cutoff = now - timedelta(minutes=30)
-        session_cutoff = now - timedelta(minutes=30)  # PAYMENT_SESSION_MINUTES
         stale_ids = list(
             Booking.objects.filter(
                 status=Booking.Status.PENDING, created_at__lt=cutoff
             )
             .exclude(payments__status=Payment.Status.SUCCESS)
-            .exclude(
-                payments__status=Payment.Status.PENDING,
-                payments__created_at__gte=session_cutoff,
-            )
+            .exclude(payments__status=Payment.Status.PENDING)
             .distinct()
             .values_list("pk", flat=True)
         )
@@ -311,7 +307,7 @@ class ExpiryVsSettlementClobberTests(ThrottlelessTestMixin, TransactionTestCase)
 
         # 3. the command's per-booking expiry, on the pre-settlement scan
         for stale_pk in stale_ids:
-            expire_booking(stale_pk, cutoff, session_cutoff)
+            expire_booking(stale_pk, cutoff)
 
         # DESIRED: the settled money and status survive the race
         booking.refresh_from_db()
@@ -334,10 +330,7 @@ class ExpiryVsSettlementClobberTests(ThrottlelessTestMixin, TransactionTestCase)
         Booking.objects.filter(pk=booking.pk).update(
             created_at=timezone.now() - timedelta(minutes=45)
         )
-        now = timezone.now()
-        result = expire_booking(
-            booking.pk, now - timedelta(minutes=30), now - timedelta(minutes=30)
-        )
+        result = expire_booking(booking.pk, timezone.now() - timedelta(minutes=30))
         self.assertIsNotNone(result)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
@@ -401,10 +394,13 @@ class PayInitiateVsExpiryRaceTests(ThrottlelessTestMixin, APITestCase):
 
 
 class DoubleSettlementTests(ThrottlelessTestMixin, APITestCase):
-    """BUG 13 REPRO (now asserting the fix) — a second full-payment session
-    supersedes the first; money later landing on the superseded session is
-    never credited, only flagged for refund. paid_amount can no longer
-    double and due_amount can no longer go negative."""
+    """BUG 13 REPRO (now asserting the fix) — a two-tab customer can never
+    end up with two payable checkout pages.
+
+    Originally a second initiate SUPERSEDED the first (cancelling its row but
+    leaving its gateway session live and payable — QA H4). Now an identical
+    re-request REUSES the one live session, so only one page can ever take
+    money and paid_amount cannot double."""
 
     @classmethod
     def setUpTestData(cls):
@@ -425,11 +421,13 @@ class DoubleSettlementTests(ThrottlelessTestMixin, APITestCase):
         ):
             return self.client.post(
                 "/api/payments/ipn/",
-                {
-                    "tran_id": payment.transaction_id,
-                    "val_id": f"VAL-{payment.pk}",
-                    "status": "VALID",
-                },
+                sign_ipn(
+                    {
+                        "tran_id": payment.transaction_id,
+                        "val_id": f"VAL-{payment.pk}",
+                        "status": "VALID",
+                    }
+                ),
             )
 
     def test_second_full_session_cannot_over_credit(self):
@@ -446,7 +444,7 @@ class DoubleSettlementTests(ThrottlelessTestMixin, APITestCase):
         booking.save()
         total = booking.total_amount
 
-        # customer opens the payment page twice → two full-due sessions
+        # customer opens the payment page twice — identical full-due request
         with patch(
             "apps.bookings.sslcommerz.create_session", return_value=GATEWAY_URL
         ):
@@ -461,27 +459,27 @@ class DoubleSettlementTests(ThrottlelessTestMixin, APITestCase):
                 format="json",
             )
         self.assertEqual(r1.status_code, 200)
-        self.assertEqual(r2.status_code, 200)  # second session freely created
+        self.assertEqual(r2.status_code, 200)
 
-        p1 = Payment.objects.get(transaction_id=r1.data["tran_id"])
-        p2 = Payment.objects.get(transaction_id=r2.data["tran_id"])
-        # the second initiate superseded the first session
-        p1.refresh_from_db()
-        self.assertEqual(p1.status, Payment.Status.CANCELLED)
+        # Both tabs point at the SAME live session — there is no second
+        # payable checkout page to strand the customer's money on.
+        self.assertEqual(r2.data["tran_id"], r1.data["tran_id"])
+        self.assertEqual(booking.payments.count(), 1)
+        payment = Payment.objects.get(transaction_id=r1.data["tran_id"])
 
-        self.settle_via_ipn(p1)
-        self.settle_via_ipn(p2)  # both tabs completed at the gateway
+        # Both tabs complete at the gateway: the duplicate IPN is idempotent.
+        self.settle_via_ipn(payment)
+        self.settle_via_ipn(payment)
 
         booking.refresh_from_db()
-        # DESIRED: the booking never absorbs more than its total; the second
-        # settlement must be blocked, flagged, or auto-refund-queued.
-        self.assertLessEqual(booking.paid_amount, total)
-        self.assertGreaterEqual(booking.due_amount, Decimal("0.00"))
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.SUCCESS)
+        # Credited exactly once — never doubled, never negative.
+        self.assertEqual(booking.paid_amount, total)
+        self.assertEqual(booking.due_amount, Decimal("0.00"))
         self.assertEqual(booking.status, Booking.Status.FULLY_PAID)
-        # the superseded session's real money is flagged for a manual refund
-        p1.refresh_from_db()
-        self.assertNotEqual(p1.status, Payment.Status.SUCCESS)
-        self.assertTrue(p1.gateway_payload.get("requires_refund"))
+        # Nobody's money was stranded, so no refund is owed.
+        self.assertFalse(booking.refund_required)
 
 
 class ConcurrentSettlementLostUpdateTests(ThrottlelessTestMixin, TransactionTestCase):
@@ -541,11 +539,13 @@ class ConcurrentSettlementLostUpdateTests(ThrottlelessTestMixin, TransactionTest
                 client = APIClient()
                 client.post(
                     "/api/payments/ipn/",
-                    {
-                        "tran_id": payment.transaction_id,
-                        "val_id": f"VAL-LU{payment.pk}",
-                        "status": "VALID",
-                    },
+                    sign_ipn(
+                        {
+                            "tran_id": payment.transaction_id,
+                            "val_id": f"VAL-LU{payment.pk}",
+                            "status": "VALID",
+                        }
+                    ),
                 )
             finally:
                 connections.close_all()

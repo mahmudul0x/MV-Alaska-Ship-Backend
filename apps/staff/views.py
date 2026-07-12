@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Count, OuterRef, Q, Subquery, Sum
-from django.http import HttpResponse
+from django.http import FileResponse, Http404, HttpResponse
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from apps.bookings import invoices
+from apps.bookings import invoices, payment_service
 from apps.bookings.models import Booking, Invoice, Payment
 from apps.bookings.reports import generate_guide_report_pdf
 from apps.bookings.serializers import BookingPublicSerializer
@@ -33,6 +33,7 @@ from .serializers import (
     StaffKidPricingRuleSerializer,
     StaffPackageRoomSerializer,
     StaffPackageSerializer,
+    StaffPaymentResolveSerializer,
     StaffPaymentSerializer,
     StaffRoomSerializer,
     StaffRoomTypeSerializer,
@@ -198,6 +199,10 @@ class StaffBookingViewSet(viewsets.ModelViewSet):
                 raise ValidationError({"package": "Must be a package id."})
         if params.get("status"):
             qs = qs.filter(status=params["status"])
+        if params.get("refund_required") in ("true", "false"):
+            # "Refunds owed" queue: cancelled-with-money bookings must be
+            # findable, not buried among ordinary cancellations.
+            qs = qs.filter(refund_required=params["refund_required"] == "true")
         if params.get("search"):
             term = params["search"]
             qs = qs.filter(
@@ -221,12 +226,21 @@ class StaffBookingViewSet(viewsets.ModelViewSet):
     def summary(self, request):
         """Aggregate totals across the *entire* filtered set (not just one
         page), so the dashboard's summary cards show true figures that still
-        honor the active package/status/search filters."""
+        honor the active package/status/search filters.
+
+        Money figures come from ACTIVE bookings only — a cancelled booking is
+        not collectable, so folding it in would inflate the totals. Cancelled
+        money is reported as its own line (cancelled_paid_amount: deposits
+        sitting on cancelled bookings, i.e. the refund conversation)."""
         qs = self.get_queryset()
-        agg = qs.aggregate(
+        active = qs.exclude(status=Booking.Status.CANCELLED)
+        agg = active.aggregate(
             total=Sum("total_amount"),
             paid=Sum("paid_amount"),
             due=Sum("due_amount"),
+        )
+        cancelled_agg = qs.filter(status=Booking.Status.CANCELLED).aggregate(
+            paid=Sum("paid_amount")
         )
         by_status = {
             value: 0 for value, _ in Booking.Status.choices
@@ -235,7 +249,6 @@ class StaffBookingViewSet(viewsets.ModelViewSet):
             by_status[row["status"]] = row["c"]
 
         count = qs.count()
-        active = qs.exclude(status=Booking.Status.CANCELLED)
         active_count = active.count()
         fully_paid = by_status.get(Booking.Status.FULLY_PAID, 0) + by_status.get(
             Booking.Status.COMPLETED, 0
@@ -255,6 +268,8 @@ class StaffBookingViewSet(viewsets.ModelViewSet):
                 "total_amount": money(agg["total"]),
                 "paid_amount": money(agg["paid"]),
                 "due_amount": money(agg["due"]),
+                "cancelled_paid_amount": money(cancelled_agg["paid"]),
+                "refunds_owed_count": qs.filter(refund_required=True).count(),
                 "fully_paid_rate": str(fully_paid_rate),
                 "by_status": by_status,
             }
@@ -279,7 +294,8 @@ class StaffPaymentViewSet(
     mixins.CreateModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet
 ):
     """List payments + record manual (cash/offline) collections — e.g. dues
-    the guide collects on the ship."""
+    the guide collects on the ship — and resolve payments the gateway would
+    never settle (`resolve` action)."""
 
     permission_classes = [IsAdminUser]
     serializer_class = StaffPaymentSerializer
@@ -289,17 +305,72 @@ class StaffPaymentViewSet(
         qs = Payment.objects.select_related("booking").order_by("-created_at")
         if self.request.query_params.get("booking"):
             qs = qs.filter(booking_id=self.request.query_params["booking"])
+        # The manual-review queue: payments the gateway will not resolve, each
+        # of which is holding a cabin out of inventory until staff act (QA H7).
+        review = self.request.query_params.get("needs_manual_review")
+        if review is not None:
+            qs = qs.filter(needs_manual_review=review.lower() in ("1", "true", "yes"))
         return qs
 
-    def perform_create(self, serializer):
-        payment = serializer.save(
-            gateway=serializer.validated_data.get("gateway") or "cash",
-            status=Payment.Status.SUCCESS,
-            paid_at=timezone.now(),
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, pk=None):
+        """Staff resolution of a stuck payment (QA H7).
+
+        A payment escalated to needs_manual_review sits PENDING, and a PENDING
+        payment blocks its room from ever being released — so without a human
+        control the cabin is lost from inventory permanently. Having checked
+        the SSLCommerz merchant panel, staff either close it (no money moved →
+        the expiry job reclaims the cabin) or settle it (money moved → credit
+        the customer). Both are audited on the payment.
+        """
+        payment = self.get_object()
+        serializer = StaffPaymentResolveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payment = payment_service.resolve_payment_manually(
+            payment,
+            serializer.validated_data["status"],
+            staff_user=request.user,
+            note=serializer.validated_data.get("note", ""),
         )
+        return Response(StaffPaymentSerializer(payment).data)
+
+    def perform_create(self, serializer):
+        # The serializer's status/ceiling checks are check-then-act; re-verify
+        # under a lock on the booking row so a concurrent gateway settlement
+        # (or another staff member) can't slip this collection past the due —
+        # an over-recorded amount would put a negative due on the guide's
+        # printed collection sheet.
+        with transaction.atomic():
+            booking = Booking.objects.select_for_update().get(
+                pk=serializer.validated_data["booking"].pk
+            )
+            if booking.status in (
+                Booking.Status.CANCELLED,
+                Booking.Status.COMPLETED,
+            ):
+                raise ValidationError(
+                    {
+                        "booking": (
+                            f"This booking is {booking.get_status_display().lower()}"
+                            " — payments can no longer be recorded against it."
+                        )
+                    }
+                )
+            amount = serializer.validated_data["amount"]
+            if amount > booking.due_amount:
+                raise ValidationError(
+                    {"amount": f"Amount exceeds the due amount ({booking.due_amount})."}
+                )
+            payment = serializer.save(
+                gateway=serializer.validated_data.get("gateway") or "cash",
+                status=Payment.Status.SUCCESS,
+                paid_at=timezone.now(),
+            )
         # Same invoice-per-payment behavior as gateway payments (Phase 5).
         booking = payment.booking
-        transaction.on_commit(lambda: invoices.create_and_send_invoice(booking))
+        transaction.on_commit(
+            lambda: invoices.create_and_send_invoice(booking, payment=payment)
+        )
 
 
 class StaffRoomTypeViewSet(viewsets.ModelViewSet):
@@ -344,6 +415,24 @@ class StaffInvoiceViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(booking_id=self.request.query_params["booking"])
         return qs
 
+    @action(detail=True, methods=["get"])
+    def pdf(self, request, pk=None):
+        """Stream the invoice PDF through the API, behind IsAdminUser.
+
+        The PDF used to be handed out as a raw MEDIA_URL link — served by
+        django.views.static.serve with no access check at all under DEBUG, and
+        a dead 404 without it (QA C1). It is now only ever reachable through an
+        authenticated view.
+        """
+        invoice = self.get_object()
+        if not invoice.pdf_file:
+            raise Http404("This invoice has no PDF.")
+        return FileResponse(
+            invoice.pdf_file.open("rb"),
+            content_type="application/pdf",
+            filename=f"{invoice.number}.pdf",
+        )
+
     @action(detail=True, methods=["post"])
     def resend(self, request, pk=None):
         invoice = self.get_object()
@@ -374,6 +463,13 @@ class StaffOverviewView(APIView):
         upcoming = Package.objects.filter(
             status=Package.Status.OPEN, end_date__gte=today
         ).count()
+
+        # Money the company owes back to customers (cancelled-with-deposit,
+        # money settled on dead sessions). As visible as money it is owed —
+        # refunds are manual phone calls, so the dashboard is the only nudge.
+        refunds_owed = Booking.objects.filter(refund_required=True).aggregate(
+            count=Count("pk"), paid_total=Sum("paid_amount")
+        )
 
         status_counts = dict(
             Booking.objects.values_list("status").annotate(c=Count("pk")).order_by()
@@ -460,6 +556,9 @@ class StaffOverviewView(APIView):
                 "pending_payment_bookings": status_counts.get(
                     Booking.Status.PENDING, 0
                 ),
+                "refunds_owed_count": refunds_owed["count"] or 0,
+                "refunds_owed_paid_total": refunds_owed["paid_total"]
+                or Decimal("0.00"),
                 "bookings_today": Booking.objects.filter(
                     created_at__date=today
                 ).count(),

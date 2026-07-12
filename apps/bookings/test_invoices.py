@@ -27,7 +27,7 @@ class InvoiceFlowTests(PaymentTestCase):
 
     def test_payment_success_creates_and_emails_invoice(self):
         booking = self.make_booking()  # total 9500
-        self.pay(booking, "3000")
+        self.pay(booking, "5000")
 
         invoice = Invoice.objects.get(booking=booking)
         self.assertIsNotNone(invoice.sent_at)
@@ -39,7 +39,7 @@ class InvoiceFlowTests(PaymentTestCase):
         email = mail.outbox[0]
         self.assertEqual(email.to, [booking.email])
         self.assertIn(booking.booking_code, email.subject)
-        self.assertIn("Due: 6500.00 BDT", email.body)
+        self.assertIn("Due: 4500.00 BDT", email.body)
         filename, content, mimetype = email.attachments[0]
         self.assertTrue(filename.endswith(".pdf"))
         self.assertTrue(content.startswith(b"%PDF"))
@@ -47,19 +47,19 @@ class InvoiceFlowTests(PaymentTestCase):
 
     def test_each_partial_payment_sends_updated_invoice(self):
         booking = self.make_booking()
-        self.pay(booking, "3000")
-        self.pay(booking, "6500")
+        self.pay(booking, "5000")
+        self.pay(booking, "4500")
 
         self.assertEqual(Invoice.objects.filter(booking=booking).count(), 2)
         self.assertEqual(len(mail.outbox), 2)
-        self.assertIn("Due: 6500.00 BDT", mail.outbox[0].body)
+        self.assertIn("Due: 4500.00 BDT", mail.outbox[0].body)
         self.assertIn("Due: 0.00 BDT", mail.outbox[1].body)
         self.assertIn("PAID IN FULL", mail.outbox[1].body)
 
     def test_duplicate_ipn_sends_single_invoice(self):
         booking = self.make_booking()
         response = self.initiate(
-            booking, {"payment_type": "partial", "amount": "3000"}
+            booking, {"payment_type": "partial", "amount": "5000"}
         )
         payment = Payment.objects.get(transaction_id=response.data["tran_id"])
         verdict = self.verdict(payment)
@@ -76,12 +76,12 @@ class InvoiceFlowTests(PaymentTestCase):
             "apps.bookings.invoices.EmailMultiAlternatives.send",
             side_effect=Exception("smtp down"),
         ):
-            payment = self.pay(booking, "3000")
+            payment = self.pay(booking, "5000")
 
         payment.refresh_from_db()
         booking.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.SUCCESS)
-        self.assertEqual(booking.paid_amount, Decimal("3000.00"))
+        self.assertEqual(booking.paid_amount, Decimal("5000.00"))
         invoice = Invoice.objects.get(booking=booking)
         self.assertIsNone(invoice.sent_at)
         self.assertTrue(invoice.pdf_file.name)  # PDF still generated
@@ -92,7 +92,7 @@ class InvoiceFlowTests(PaymentTestCase):
             "apps.bookings.invoices.EmailMultiAlternatives.send",
             side_effect=Exception("smtp down"),
         ):
-            self.pay(booking, "3000")
+            self.pay(booking, "5000")
         self.assertEqual(len(mail.outbox), 0)
 
         call_command("send_unsent_invoices")

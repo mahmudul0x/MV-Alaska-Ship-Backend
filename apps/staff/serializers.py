@@ -5,7 +5,10 @@ is_booking_open, customer data across bookings) because every staff endpoint
 sits behind IsAdminUser.
 """
 
+from decimal import Decimal
+
 from django.db import IntegrityError, transaction
+from django.urls import reverse
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -142,6 +145,7 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         fields = [
             "id", "ship", "ship_name", "start_date", "end_date",
             "booking_cutoff_datetime", "adult_price", "status", "is_booking_open",
+            "min_deposit_percent", "balance_due_days_before_start",
             "marketing_title", "marketing_description", "hero_image", "highlights",
             "bookings_count", "paid_total", "due_total", "rooms_total", "is_bookable",
         ]
@@ -167,7 +171,31 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         )
         if self.instance:
             package.pk = self.instance.pk
+        package.min_deposit_percent = value("min_deposit_percent")
         package.clean()
+
+        # Changing the price of a sailing that already has bookings on it means
+        # existing customers were quoted one figure and the package now says
+        # another. Bookings freeze their own total_amount once money is in
+        # flight (QA C7), so their money is safe — but the two would silently
+        # disagree, and the guide's collection sheet is printed from the
+        # booking. Cancel-and-rebook is the honest path, so refuse the edit.
+        if self.instance and "adult_price" in attrs:
+            if attrs["adult_price"] != self.instance.adult_price:
+                active = self.instance.bookings.exclude(
+                    status=Booking.Status.CANCELLED
+                ).count()
+                if active:
+                    raise serializers.ValidationError(
+                        {
+                            "adult_price": (
+                                f"This package has {active} active booking(s) — "
+                                "its price cannot be changed. Those customers were "
+                                "quoted the current price and their bookings hold "
+                                "it. Cancel and rebook them to re-price."
+                            )
+                        }
+                    )
 
         # Moving a package to another ship would leave the old ship's rooms
         # attached: the public rooms endpoint would sell cabins that are not
@@ -200,14 +228,86 @@ class StaffPackageSerializer(serializers.ModelSerializer):
 
 class StaffPaymentSerializer(serializers.ModelSerializer):
     booking_code = serializers.CharField(source="booking.booking_code", read_only=True)
+    # Same floor as the public PaymentInitiateSerializer. Payment.clean()
+    # carries this rule too, but DRF never calls model clean() — without an
+    # explicit field a negative "payment" would be written and silently erase
+    # settled money from the ledger (paid_amount is a SUM over payments).
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0.01")
+    )
 
     class Meta:
         model = Payment
         fields = [
             "id", "booking", "booking_code", "amount", "payment_type", "gateway",
-            "transaction_id", "status", "paid_at", "created_at",
+            "transaction_id", "status", "paid_at", "created_at", "gateway_payload",
+            # A payment the gateway won't resolve holds its room out of
+            # inventory until a human settles it — staff must be able to see
+            # and act on it, not just find it in a log stream (QA H5).
+            "needs_manual_review", "reconcile_attempts", "last_reconcile_error",
+            "last_reconcile_at",
         ]
-        read_only_fields = ["transaction_id", "created_at"]
+        read_only_fields = [
+            "transaction_id", "created_at", "gateway_payload",
+            "reconcile_attempts", "last_reconcile_error", "last_reconcile_at",
+            # Resolving a stuck payment goes through the `resolve` action, which
+            # drives it under a row lock and writes an audit trail — never a
+            # bare PATCH of the status field.
+            "needs_manual_review",
+        ]
+
+    def validate(self, attrs):
+        # Friendly-error mirror of the authoritative re-check the viewset
+        # performs under a row lock (check-then-act safe). Manual collections
+        # must obey the same ceiling as the public API: recording more than
+        # the due would drive due_amount negative, and that number goes
+        # straight onto the guide's printed collection sheet.
+        booking = attrs.get("booking")
+        amount = attrs.get("amount")
+        if booking is not None:
+            if booking.status in (
+                Booking.Status.CANCELLED,
+                Booking.Status.COMPLETED,
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "booking": (
+                            f"This booking is {booking.get_status_display().lower()}"
+                            " — payments can no longer be recorded against it."
+                        )
+                    }
+                )
+            if amount is not None and amount > booking.due_amount:
+                raise serializers.ValidationError(
+                    {
+                        "amount": (
+                            f"Amount exceeds the due amount ({booking.due_amount})."
+                        )
+                    }
+                )
+        return attrs
+
+
+class StaffPaymentResolveSerializer(serializers.Serializer):
+    """Staff resolution of a payment the gateway would never settle (QA H7).
+
+    Only the three terminal states are offered: a payment can be closed
+    (no money moved — the cabin is released) or settled (money moved — credit
+    the customer). Anything else would leave it stuck, which is the bug.
+    """
+
+    status = serializers.ChoiceField(
+        choices=[
+            Payment.Status.SUCCESS,
+            Payment.Status.FAILED,
+            Payment.Status.CANCELLED,
+        ]
+    )
+    note = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="What the SSLCommerz merchant panel showed — recorded for audit.",
+    )
 
 
 class StaffStatusLogSerializer(serializers.ModelSerializer):
@@ -231,7 +331,8 @@ class StaffBookingListSerializer(serializers.ModelSerializer):
             "id", "booking_code", "customer_name", "phone", "email",
             "package", "package_title", "room", "room_number",
             "adult_count", "kid_details", "total_pax",
-            "total_amount", "paid_amount", "due_amount", "status", "created_at",
+            "total_amount", "paid_amount", "due_amount", "status",
+            "refund_required", "refund_note", "created_at",
         ]
 
     def get_package_title(self, booking):
@@ -247,12 +348,17 @@ class StaffBookingDetailSerializer(StaffBookingListSerializer):
 
 
 class StaffBookingUpdateSerializer(serializers.ModelSerializer):
-    """Staff may only touch status and contact info; pax/room changes go
-    through cancel-and-rebook so pricing and availability stay consistent."""
+    """Staff may only touch status, contact info and the refund-owed flag;
+    pax/room changes go through cancel-and-rebook so pricing and availability
+    stay consistent. refund_required/refund_note let staff clear the flag
+    once the customer has actually been refunded (with a note saying how)."""
 
     class Meta:
         model = Booking
-        fields = ["status", "customer_name", "phone", "email"]
+        fields = [
+            "status", "customer_name", "phone", "email",
+            "refund_required", "refund_note",
+        ]
 
     def validate(self, attrs):
         # Un-cancelling re-occupies the room — reject cleanly if it was
@@ -287,11 +393,24 @@ class StaffBookingUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
     def update(self, instance, validated_data):
+        was_cancelled = instance.status == Booking.Status.CANCELLED
         for field, value in validated_data.items():
             setattr(instance, field, value)
         try:
             with transaction.atomic():
                 instance.save(changed_by=self.context["request"].user)
+                # Un-cancelling: the money decides the status, not the client.
+                # Reactivating a booking with a 4750 BDT deposit as "pending"
+                # left real money in a status that claims none was paid — and
+                # PENDING is scanned by neither enforce_due_deadlines (which
+                # chases balances) nor close_sailed_bookings, so the booking
+                # would silently fall out of every job that manages it.
+                if (
+                    was_cancelled
+                    and instance.status != Booking.Status.CANCELLED
+                    and instance.paid_amount > 0
+                ):
+                    instance.refresh_paid_amount()
         except IntegrityError:
             # Lost the un-cancel race despite the validate() check above.
             raise RoomUnavailable()
@@ -332,11 +451,21 @@ class StaffInvoiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Invoice
-        fields = ["id", "booking", "booking_code", "sent_via", "sent_at", "pdf_url", "created_at"]
+        fields = [
+            "id", "number", "booking", "booking_code", "payment",
+            "total_amount", "paid_amount", "due_amount", "booking_status",
+            "sent_via", "sent_at", "pdf_url", "created_at",
+        ]
 
     def get_pdf_url(self, invoice):
-        if invoice.pdf_file:
-            request = self.context.get("request")
-            url = invoice.pdf_file.url
-            return request.build_absolute_uri(url) if request else url
-        return None
+        """The authenticated download route — never the raw MEDIA_URL.
+
+        The media path is served with no access check at all (QA C1), so the
+        dashboard fetches the PDF through the API (carrying its JWT) rather
+        than linking straight at the file.
+        """
+        if not invoice.pdf_file:
+            return None
+        url = reverse("staff-invoice-pdf", kwargs={"pk": invoice.pk})
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url

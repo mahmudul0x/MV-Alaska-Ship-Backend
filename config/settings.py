@@ -153,6 +153,12 @@ REST_FRAMEWORK = {
         # wizard, so far looser than actual booking creation.
         "quote": "60/min",
     },
+    # Trusted proxy hop count for throttling. Without it DRF keys throttle
+    # buckets on the raw client-supplied X-Forwarded-For header, which lets
+    # anyone bypass every rate limit (new header per request) or poison
+    # someone else's bucket. Match the real proxy depth of the deployment
+    # (Railway: 1).
+    "NUM_PROXIES": env.int("DRF_NUM_PROXIES", default=1),
     "EXCEPTION_HANDLER": "config.exceptions.exception_handler",
 }
 
@@ -181,6 +187,11 @@ _SSLCOMMERZ_BASE = (
 )
 SSLCOMMERZ_SESSION_URL = f"{_SSLCOMMERZ_BASE}/gwprocess/v4/api.php"
 SSLCOMMERZ_VALIDATION_URL = f"{_SSLCOMMERZ_BASE}/validator/api/validationserverAPI.php"
+# Transaction Query API — look up a session by OUR tran_id (no val_id needed).
+# Used by reconcile_pending_payments and the fail/cancel redirect handlers.
+SSLCOMMERZ_TXN_QUERY_URL = (
+    f"{_SSLCOMMERZ_BASE}/validator/api/merchantTransIDvalidationAPI.php"
+)
 
 BACKEND_URL = env("BACKEND_URL", default="http://localhost:8000")
 FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:5173")
@@ -188,11 +199,32 @@ FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:5173")
 # Unpaid PENDING bookings are auto-cancelled after this hold window.
 BOOKING_HOLD_MINUTES = env.int("BOOKING_HOLD_MINUTES", default=30)
 
-# How long an initiated (PENDING) gateway payment protects its booking from
-# hold expiry — clicking "pay" extends the hold so the room can't be resold
-# out from under a customer who is still at the SSLCommerz checkout page.
+# The gateway session lifetime: once a PENDING payment is older than this
+# AND SSLCommerz's Transaction Query API reports no payment attempt on it,
+# reconcile_pending_payments closes it as FAILED. (Room holds themselves are
+# never released on a timer while a PENDING payment exists — only after the
+# gateway has confirmed the session is dead.)
 # Must be >= the gateway's own session lifetime.
 PAYMENT_SESSION_MINUTES = env.int("PAYMENT_SESSION_MINUTES", default=30)
+
+# How many days before the balance deadline the one-off reminder email goes
+# out (enforce_due_deadlines). The deadline itself is per-package data:
+# Package.balance_due_days_before_start.
+BALANCE_DUE_REMINDER_DAYS = env.int("BALANCE_DUE_REMINDER_DAYS", default=2)
+
+# Consecutive gateway-query failures on one PENDING payment before
+# reconcile_pending_payments escalates it for manual review. A payment the
+# gateway won't answer for holds its room out of inventory, so it must reach a
+# human rather than spin forever.
+PAYMENT_MAX_RECONCILE_ATTEMPTS = env.int("PAYMENT_MAX_RECONCILE_ATTEMPTS", default=5)
+
+# An escalated payment is not abandoned — it is retried on this slow back-off.
+# Gateway outages end, and a payment nobody asks about again keeps its cabin
+# out of inventory forever; a recovered gateway auto-resolves the backlog and
+# only genuinely undecidable payments wait for the human already notified.
+PAYMENT_ESCALATED_RETRY_MINUTES = env.int(
+    "PAYMENT_ESCALATED_RETRY_MINUTES", default=60
+)
 
 
 # Email — provider-agnostic SMTP config, everything from .env.

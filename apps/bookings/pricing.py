@@ -38,6 +38,45 @@ def calculate_total(room_type, package, adult_count, kid_ages):
     return price_breakdown(room_type, package, adult_count, kid_ages)["total"]
 
 
+def snapshot_breakdown(breakdown):
+    """Breakdown → JSON-safe dict for Booking.price_snapshot.
+
+    Decimals become strings ("1500.00"), never floats — a float would round
+    money the moment it is stored. `restore_breakdown` is the exact inverse.
+    """
+    return {
+        "room_base": str(breakdown["room_base"]),
+        "adult_price": str(breakdown["adult_price"]),
+        "adult_count": breakdown["adult_count"],
+        "adults_subtotal": str(breakdown["adults_subtotal"]),
+        "kids": [
+            {"age": kid["age"], "charge": str(kid["charge"])}
+            for kid in breakdown["kids"]
+        ],
+        "kids_subtotal": str(breakdown["kids_subtotal"]),
+        "total": str(breakdown["total"]),
+    }
+
+
+def restore_breakdown(snapshot):
+    """Booking.price_snapshot → breakdown with Decimals back (inverse of
+    snapshot_breakdown). Returns None for an empty/absent snapshot."""
+    if not snapshot:
+        return None
+    return {
+        "room_base": Decimal(snapshot["room_base"]),
+        "adult_price": Decimal(snapshot["adult_price"]),
+        "adult_count": snapshot["adult_count"],
+        "adults_subtotal": Decimal(snapshot["adults_subtotal"]),
+        "kids": [
+            {"age": kid["age"], "charge": Decimal(kid["charge"])}
+            for kid in snapshot["kids"]
+        ],
+        "kids_subtotal": Decimal(snapshot["kids_subtotal"]),
+        "total": Decimal(snapshot["total"]),
+    }
+
+
 def kid_charge(age, package):
     rule = KidPricingRule.rule_for_age(age)
     if rule is None:

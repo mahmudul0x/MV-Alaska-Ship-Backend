@@ -1,41 +1,82 @@
 """Invoice PDF generation + email delivery.
 
-Sent after every successful payment with the running paid/due totals
-(PRD §5.6). PDF text is shaped with HarfBuzz (fpdf2), so Bengali and English
-both render correctly using the bundled Noto fonts in backend/assets/fonts.
+Issued after a successful payment (PRD §5.6). PDF text is shaped with HarfBuzz
+(fpdf2), so Bengali and English both render correctly using the bundled Noto
+fonts in backend/assets/fonts.
 
-total/paid/due always come from the Booking's stored fields (the money
-truth); the per-pax breakdown lines are informational.
+An issued invoice is an immutable financial record:
+
+- The money it states (total/paid/due/status) is frozen onto the Invoice row
+  at issue time, so the PDF and its covering email can never contradict each
+  other, and a resend cannot silently restate an old invoice's numbers.
+- The line items come from Booking.price_snapshot — the itemisation frozen
+  when the booking was priced — never from today's (admin-editable) pricing
+  rules, which would re-price an already-paid booking.
 """
 
 import logging
+from functools import lru_cache
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
 from django.utils.html import escape
+from fontTools.ttLib import TTFont
 from fpdf import FPDF
 
 from .branding import draw_header_logo, draw_signature_block, draw_watermark
-from .models import Invoice, Payment
-from .pricing import price_breakdown
+from .models import Booking, Invoice, Payment
+from .pricing import restore_breakdown
 
 logger = logging.getLogger(__name__)
 
 FONTS_DIR = settings.BASE_DIR / "assets" / "fonts"
 
+#: Authority contact numbers, printed in the invoice header so the customer can
+#: reach the office. Data, not a baked-in string, so they are easy to update.
+AUTHORITY_PHONES = ["01712-823482", "01831-694307", "01342-919795"]
 
-def create_and_send_invoice(booking):
-    """Create an Invoice (row + PDF) and email it. Never raises — payment
-    processing must not be disturbed by invoice/email trouble."""
-    invoice = Invoice.objects.create(booking=booking, sent_via=Invoice.SentVia.EMAIL)
+#: Booking states an invoice may be issued for. An invoice attests to money
+#: received: a booking with nothing paid has nothing to attest to, and a
+#: cancelled booking's money is owed back, not collected (QA M3).
+INVOICEABLE_STATUSES = (Booking.Status.PARTIALLY_PAID, Booking.Status.FULLY_PAID)
+
+
+class InvoiceNotPayable(Exception):
+    """Refused to issue an invoice for a booking with no money on it."""
+
+
+def create_and_send_invoice(booking, payment=None):
+    """Create an Invoice (row + PDF) and email it.
+
+    PDF/email trouble never raises — payment processing must not be disturbed
+    by it. But issuing an invoice for a booking that was never paid DOES
+    raise: that guard lives here, in the invoice layer, rather than in each
+    caller, so no code path can mint an official sealed document for money
+    that was never received (QA M3).
+    """
+    booking.refresh_from_db()
+    if booking.status not in INVOICEABLE_STATUSES or booking.paid_amount <= 0:
+        raise InvoiceNotPayable(
+            f"{booking.booking_code} is '{booking.status}' with "
+            f"{booking.paid_amount} paid — there is nothing to invoice."
+        )
+
+    invoice = Invoice.objects.create(
+        booking=booking,
+        payment=payment,
+        sent_via=Invoice.SentVia.EMAIL,
+        # Freeze the money this invoice attests to. The booking's live totals
+        # keep moving as the customer pays; an issued invoice must not (M2).
+        total_amount=booking.total_amount,
+        paid_amount=booking.paid_amount,
+        due_amount=booking.due_amount,
+        booking_status=booking.status,
+    )
     try:
         pdf_bytes = generate_invoice_pdf(invoice)
-        invoice.pdf_file.save(
-            f"{invoice_number(invoice)}.pdf", ContentFile(pdf_bytes), save=True
-        )
+        invoice.pdf_file.save(f"{invoice.number}.pdf", ContentFile(pdf_bytes), save=True)
     except Exception:
         logger.exception("Invoice PDF generation failed for %s", booking.booking_code)
         return invoice
@@ -48,24 +89,44 @@ def create_and_send_invoice(booking):
 
 
 def invoice_number(invoice):
-    return f"INV-{invoice.booking.booking_code}-{invoice.pk}"
+    """The issued number — stored on the row, never re-derived at render time."""
+    return invoice.number
+
+
+def invoice_state_label(invoice):
+    """The status this invoice states. Falls back to the booking's live status
+    for rows issued before booking_status existed (it is blank on those)."""
+    status = invoice.booking_status or invoice.booking.status
+    if status == Booking.Status.FULLY_PAID:
+        return "PAID IN FULL"
+    try:
+        return Booking.Status(status).label
+    except ValueError:
+        return str(status or "—")
 
 
 def send_invoice_email(invoice):
+    """Email the invoice.
+
+    Every figure comes from the INVOICE, not from the live booking. A resend
+    of an old invoice must describe *that* invoice: reading the booking here
+    is what let one email say "PAID IN FULL" while the PDF it was announcing
+    showed an outstanding balance (QA M2).
+    """
     booking = invoice.booking
     ship_name = booking.package.ship.name
-    fully_paid = booking.due_amount <= 0
-    subject = f"{ship_name} — Invoice for booking {booking.booking_code}"
+    subject = f"{ship_name} — Invoice {invoice.number} for booking {booking.booking_code}"
     # Plain-text fallback for clients that don't render HTML.
     body = (
         f"Dear {booking.customer_name},\n\n"
         f"Thank you for your payment. Your invoice is attached.\n\n"
+        f"Invoice: {invoice.number}\n"
         f"Booking: {booking.booking_code}\n"
         f"Room: {booking.room.room_number}\n"
-        f"Total: {booking.total_amount} BDT\n"
-        f"Paid: {booking.paid_amount} BDT\n"
-        f"Due: {booking.due_amount} BDT"
-        + ("\n\nYour booking is PAID IN FULL." if fully_paid else "")
+        f"Total: {invoice.total_amount} BDT\n"
+        f"Paid: {invoice.paid_amount} BDT\n"
+        f"Due: {invoice.due_amount} BDT"
+        + ("\n\nYour booking is PAID IN FULL." if invoice.fully_paid else "")
         + f"\n\n{ship_name}"
     )
     message = EmailMultiAlternatives(subject=subject, body=body, to=[booking.email])
@@ -73,7 +134,7 @@ def send_invoice_email(invoice):
     invoice.pdf_file.open("rb")
     try:
         message.attach(
-            f"{invoice_number(invoice)}.pdf", invoice.pdf_file.read(), "application/pdf"
+            f"{invoice.number}.pdf", invoice.pdf_file.read(), "application/pdf"
         )
     finally:
         invoice.pdf_file.close()
@@ -84,11 +145,14 @@ def send_invoice_email(invoice):
 
 def _invoice_email_html(invoice):
     """Branded HTML body — email-safe markup only (tables + inline styles),
-    since email clients ignore stylesheets and block remote assets."""
+    since email clients ignore stylesheets and block remote assets.
+
+    Reads the invoice's frozen figures, never the live booking (see
+    send_invoice_email)."""
     booking = invoice.booking
     package = booking.package
     ship_name = escape(package.ship.name)
-    fully_paid = booking.due_amount <= 0
+    fully_paid = invoice.fully_paid
 
     label = 'style="padding:9px 0;color:#69737d;font-size:13px;width:38%;"'
     value = 'style="padding:9px 0;color:#28323c;font-size:13px;font-weight:bold;"'
@@ -110,8 +174,8 @@ def _invoice_email_html(invoice):
         f'<tr><td style="padding:7px 14px;font-size:13px;color:#69737d;">{k}</td>'
         f"<td {amount}>{v} BDT</td></tr>"
         for k, v in [
-            ("Total amount", booking.total_amount),
-            ("Paid so far", booking.paid_amount),
+            ("Total amount", invoice.total_amount),
+            ("Paid so far", invoice.paid_amount),
         ]
     )
     due_row = (
@@ -119,7 +183,7 @@ def _invoice_email_html(invoice):
         '<td style="padding:9px 14px;font-size:13px;color:#ffffff;font-weight:bold;">'
         "Due amount</td>"
         '<td style="padding:9px 14px;font-size:14px;text-align:right;color:#ffffff;'
-        f'font-weight:bold;">{booking.due_amount} BDT</td></tr>'
+        f'font-weight:bold;">{invoice.due_amount} BDT</td></tr>'
     )
     if fully_paid:
         status_banner = (
@@ -131,7 +195,7 @@ def _invoice_email_html(invoice):
         status_banner = (
             '<div style="background:#fdf3e0;color:#8a5a10;text-align:center;'
             'padding:11px;border-radius:5px;font-size:13px;">'
-            f"Remaining balance: <strong>{booking.due_amount} BDT</strong> — "
+            f"Remaining balance: <strong>{invoice.due_amount} BDT</strong> — "
             "please clear the due amount before your tour date.</div>"
         )
 
@@ -187,11 +251,81 @@ def _invoice_email_html(invoice):
 """
 
 
+def send_balance_reminder_email(booking):
+    """One-off nudge before the balance deadline (enforce_due_deadlines).
+
+    Plain transactional email — the customer already has the invoice PDF with
+    the full policy; this only needs the number and the date."""
+    package = booking.package
+    ship_name = package.ship.name
+    deadline = timezone.localtime(package.balance_due_at())
+    subject = (
+        f"{ship_name} — balance due for booking {booking.booking_code}"
+    )
+    body = (
+        f"Dear {booking.customer_name},\n\n"
+        f"A friendly reminder: your booking {booking.booking_code} for the "
+        f"{package.start_date:%d %b %Y} tour has an outstanding balance of "
+        f"{booking.due_amount} BDT (paid so far: {booking.paid_amount} BDT).\n\n"
+        f"Please try to settle the balance by {deadline:%d %b %Y, %I:%M %p}. "
+        "You can pay it any time before departure from your booking "
+        "confirmation page — or simply pay our guide when you board. Your "
+        "cabin stays reserved for you either way.\n\n"
+        f"{ship_name}"
+    )
+    EmailMultiAlternatives(subject=subject, body=body, to=[booking.email]).send()
+
+
+def send_cancellation_email(booking):
+    """Tell the customer their booking is cancelled (QA M3).
+
+    Fired from Booking.save() on every → CANCELLED transition, so the deadline
+    cron, the staff API and the Django admin are all covered without anyone
+    remembering to opt in. Never raises: a cancellation must not be rolled
+    back (or a cron run aborted) by an SMTP problem.
+
+    A cancelled booking's room is immediately back on public sale, so the one
+    thing the customer must not be is uninformed — without this their first
+    sign is turning up at the jetty.
+    """
+    try:
+        package = booking.package
+        ship_name = package.ship.name
+        paid = booking.paid_amount
+        subject = f"{ship_name} — booking {booking.booking_code} has been cancelled"
+        body = (
+            f"Dear {booking.customer_name},\n\n"
+            f"Your booking {booking.booking_code} (room "
+            f"{booking.room.room_number}) for the "
+            f"{package.start_date:%d %b %Y} tour has been cancelled.\n\n"
+        )
+        if paid > 0:
+            body += (
+                f"You have paid {paid} BDT against this booking. Our "
+                "cancellation-charge schedule determines how much of this is "
+                "refundable. Our team will contact you on "
+                f"{booking.phone} to arrange any refund — refunds are handled "
+                "manually and are not issued automatically.\n\n"
+            )
+        else:
+            body += "No payment was received against this booking.\n\n"
+        body += (
+            "If you believe this is a mistake, please contact us as soon as "
+            f"possible.\n\n{ship_name}"
+        )
+        EmailMultiAlternatives(subject=subject, body=body, to=[booking.email]).send()
+    except Exception:
+        logger.exception(
+            "Cancellation email failed for %s", booking.booking_code
+        )
+
+
 # Condensed from the company's official Payment & Cancellation Policy —
 # printed on every invoice; the full version lives on the website's policy page.
 POLICY_POINTS = [
     "Booking confirmation requires a 50% advance payment; the remaining balance "
-    "must be settled before the journey.",
+    "may be settled any time before the journey — online from your booking page, "
+    "or paid to our guide on board. Your cabin stays reserved.",
     "Cancellation charges (% of total amount) — individual bookings: 3 weeks "
     "before departure 5%, 2 weeks 15%, 1 week 35%, 3 days 50%, 48 hours 75%, "
     "24 hours 90%, less than 24 hours 100%.",
@@ -225,9 +359,114 @@ def _draw_policy_panel(pdf, x, y, width):
     return pdf.get_y()
 
 
+#: The fonts embedded in the PDF, in fallback order.
+FONT_FILES = {
+    "NotoSans": "NotoSans-Regular.ttf",
+    "NotoSansBengali": "NotoSansBengali-Regular.ttf",
+    "NotoSansArabic": "NotoSansArabic-Regular.ttf",
+}
+
+
+@lru_cache(maxsize=1)
+def _covered_codepoints():
+    """Every code point the embedded fonts can actually draw.
+
+    fpdf2 drops a glyph it has no font for *silently* — no exception, no
+    warning. A guest named in a script we don't embed would get an invoice
+    with a blank name field and nobody would ever know (QA H2). We therefore
+    read the fonts' cmaps up front and decide explicitly what to do.
+    """
+    covered = set()
+    for filename in FONT_FILES.values():
+        path = FONTS_DIR / filename
+        if not path.exists():
+            continue
+        with TTFont(str(path), fontNumber=0, lazy=True) as font:
+            for table in font["cmap"].tables:
+                covered.update(table.cmap.keys())
+    return frozenset(covered)
+
+
+def uncovered_characters(text):
+    """The characters in `text` that no embedded font can draw."""
+    covered = _covered_codepoints()
+    return {
+        ch
+        for ch in str(text)
+        if not ch.isspace() and ord(ch) not in covered
+    }
+
+
+def render_safe(text):
+    """`text` with any un-drawable character replaced by a visible marker.
+
+    Never return an empty string where the caller expected content: a blank
+    'Name' on a sealed invoice is worse than a transliterated one, because
+    nothing about it looks wrong. The caller logs the substitution so staff
+    can follow up.
+    """
+    text = str(text)
+    missing = uncovered_characters(text)
+    if not missing:
+        return text
+    covered = _covered_codepoints()
+    out = "".join(
+        ch if (ch.isspace() or ord(ch) in covered) else "?" for ch in text
+    )
+    return out.strip() or "?"
+
+
+def fitted_text(pdf, text, width, base_size, min_size=6.0):
+    """Return (text, font_size) that fits `width` mm in the CURRENT font.
+
+    fpdf2's cell() neither wraps nor truncates — it just keeps drawing, so an
+    over-long value runs straight through the neighbouring column and both
+    become unreadable (QA H1). We shrink the type first (a slightly smaller
+    name is still a correct name), and only ellipsise if even min_size will
+    not fit.
+    """
+    family, style = pdf.font_family, pdf.font_style
+    size = base_size
+    while size > min_size:
+        pdf.set_font(family, style, size)
+        if pdf.get_string_width(text) <= width:
+            return text, size
+        size -= 0.25
+
+    pdf.set_font(family, style, min_size)
+    if pdf.get_string_width(text) <= width:
+        return text, min_size
+    ellipsis = "…" if not uncovered_characters("…") else "..."
+    truncated = text
+    while truncated and pdf.get_string_width(truncated + ellipsis) > width:
+        truncated = truncated[:-1]
+    return (truncated + ellipsis) if truncated else ellipsis, min_size
+
+
+def _fitted_cell(pdf, width, height, text, base_size, **kwargs):
+    """cell() that is guaranteed to stay inside `width`."""
+    text, size = fitted_text(pdf, text, width - 2, base_size)
+    pdf.cell(width, height, text, **kwargs)
+    pdf.set_font(pdf.font_family, pdf.font_style, base_size)
+
+
 def generate_invoice_pdf(invoice):
     booking = invoice.booking
     package = booking.package
+
+    # Any character we cannot draw is replaced by a visible marker rather than
+    # vanishing. Log it so staff can correct the record (QA H2).
+    missing = uncovered_characters(
+        f"{booking.customer_name}{booking.email}{booking.room.room_number}"
+    )
+    if missing:
+        logger.warning(
+            "Invoice %s: no embedded font covers %s in booking %s — rendered as "
+            "'?'. Add the script's Noto font to assets/fonts.",
+            invoice.number,
+            "".join(sorted(missing)),
+            booking.booking_code,
+        )
 
     NAVY = (16, 46, 80)
     ACCENT = (232, 238, 245)
@@ -243,7 +482,11 @@ def generate_invoice_pdf(invoice):
     pdf.add_font("NotoSans", "B", FONTS_DIR / "NotoSans-Bold.ttf")
     pdf.add_font("NotoSansBengali", "", FONTS_DIR / "NotoSansBengali-Regular.ttf")
     pdf.add_font("NotoSansBengali", "B", FONTS_DIR / "NotoSansBengali-Bold.ttf")
-    pdf.set_fallback_fonts(["NotoSansBengali"])
+    fallbacks = ["NotoSansBengali"]
+    if (FONTS_DIR / FONT_FILES["NotoSansArabic"]).exists():
+        pdf.add_font("NotoSansArabic", "", FONTS_DIR / FONT_FILES["NotoSansArabic"])
+        fallbacks.append("NotoSansArabic")
+    pdf.set_fallback_fonts(fallbacks)
     pdf.set_text_shaping(True)
     epw = pdf.epw  # usable width between margins
 
@@ -262,7 +505,11 @@ def generate_invoice_pdf(invoice):
     pdf.set_text_color(*GREY)
     pdf.set_x(text_x)
     pdf.cell(epw / 2 - 29, 6, "Ship Tour Package Booking")
-    pdf.cell(epw / 2, 6, invoice_number(invoice), align="R")
+    pdf.cell(epw / 2, 6, invoice.number, align="R")
+    # Authority contact numbers — top-right corner, under the invoice number.
+    pdf.set_font("NotoSans", "", 7.5)
+    pdf.set_xy(text_x, 24)
+    pdf.cell(epw - 29, 4, "Helpline: " + "  ·  ".join(AUTHORITY_PHONES), align="R")
     pdf.set_draw_color(*NAVY)
     pdf.set_line_width(0.5)
     pdf.line(pdf.l_margin, 34, pdf.l_margin + epw, 34)
@@ -275,8 +522,13 @@ def generate_invoice_pdf(invoice):
     issued = f"{timezone.localtime(invoice.created_at):%d %b %Y, %I:%M %p}"
     pdf.cell(epw / 3, 6, f"Invoice date: {issued}")
     pdf.cell(epw / 3, 6, f"Booking: {booking.booking_code}", align="C")
-    state = "PAID IN FULL" if booking.due_amount <= 0 else booking.get_status_display()
-    pdf.cell(epw / 3, 6, f"Status: {state}", align="R", new_x="LMARGIN", new_y="NEXT")
+    # "PAID IN FULL" is a claim about the booking's STATUS at issue time, not
+    # merely about due==0 — a CANCELLED booking also has due==0 (uncollectable,
+    # not settled) and was being stamped "PAID IN FULL" (QA M3).
+    pdf.cell(
+        epw / 3, 6, f"Status: {invoice_state_label(invoice)}", align="R",
+        new_x="LMARGIN", new_y="NEXT",
+    )
     pdf.set_draw_color(*RULE)
     pdf.line(pdf.l_margin, pdf.get_y() + 1, pdf.l_margin + epw, pdf.get_y() + 1)
     pdf.ln(6)
@@ -292,14 +544,21 @@ def generate_invoice_pdf(invoice):
         pdf.set_fill_color(*ACCENT)
         pdf.cell(col_w, 7, f"  {title}", fill=True, new_x="LEFT", new_y="NEXT")
         pdf.set_text_color(40, 40, 40)
+        label_w, value_w = col_w * 0.34, col_w * 0.66
         for label, value in rows:
             pdf.set_x(x)
             pdf.set_font("NotoSans", "", 9)
             pdf.set_text_color(*GREY)
-            pdf.cell(col_w * 0.34, 6.5, f"  {label}")
+            pdf.cell(label_w, 6.5, f"  {label}")
             pdf.set_font("NotoSans", "", 9.5)
             pdf.set_text_color(40, 40, 40)
-            pdf.cell(col_w * 0.66, 6.5, str(value), new_x="LEFT", new_y="NEXT")
+            # Shrink-to-fit inside value_w. A plain cell() would keep drawing
+            # past the column and overprint the block to its right, wrecking
+            # both (QA H1) — an 82-char name is well within max_length=100.
+            _fitted_cell(
+                pdf, value_w, 6.5, render_safe(value), 9.5,
+                new_x="LEFT", new_y="NEXT",
+            )
 
     info_block(
         pdf.l_margin,
@@ -342,16 +601,25 @@ def generate_invoice_pdf(invoice):
         pdf.set_text_color(40, 40, 40)
         pdf.set_fill_color(*(ZEBRA if shade else (255, 255, 255)))
         for value, width, align in cells:
-            pdf.cell(width, 7, f" {value} ", fill=True, align=align)
+            _fitted_cell(
+                pdf, width, 7, f" {render_safe(value)} ", 9, fill=True, align=align
+            )
         pdf.ln()
 
     # ── Charges table ──────────────────────────────────────────────────────
+    # Line items come from the snapshot frozen when the booking was priced —
+    # never recomputed from today's (admin-editable) KidPricingRule /
+    # adult_price, which would re-price an already-paid booking and leave the
+    # itemisation not summing to what was charged (QA M1).
     desc_w, amt_w = epw - 45, 45
     table_header("CHARGES", [("Description", desc_w, "L"), ("Amount (BDT)", amt_w, "R")])
-    try:
-        breakdown = price_breakdown(
-            booking.room.room_type, package, booking.adult_count, booking.kid_ages
-        )
+    breakdown = restore_breakdown(booking.price_snapshot)
+    if breakdown is None:
+        # Pre-snapshot booking (or a snapshot that never got written): the
+        # stored total is still the money truth, so show it as a single line
+        # rather than inventing an itemisation that may not add up.
+        rows = [("Package charges", invoice.total_amount)]
+    else:
         rows = [
             (f"Room {booking.room.room_number} — base price", breakdown["room_base"]),
             (
@@ -361,17 +629,18 @@ def generate_invoice_pdf(invoice):
         ] + [
             (f"Kid fare (age {kid['age']})", kid["charge"]) for kid in breakdown["kids"]
         ]
-    except ValidationError:
-        # Pricing rules changed since booking — the stored total still rules.
-        rows = [("Package charges", booking.total_amount)]
     for i, (desc, amount) in enumerate(rows):
         table_row([(desc, desc_w, "L"), (f"{amount}", amt_w, "R")], shade=i % 2 == 0)
     pdf.ln(5)
 
     # ── Payments table ─────────────────────────────────────────────────────
-    payments = booking.payments.filter(status=Payment.Status.SUCCESS).order_by(
-        "paid_at", "pk"
-    )
+    # Only payments that existed when this invoice was ISSUED. Otherwise a
+    # re-render (resend, or regeneration after a redeploy) would grow new rows
+    # that the invoice's own frozen "Paid so far" does not account for, and the
+    # document would stop adding up.
+    payments = booking.payments.filter(
+        status=Payment.Status.SUCCESS, paid_at__lte=invoice.created_at
+    ).order_by("paid_at", "pk")
     if payments:
         d_w, t_w, y_w, a_w = 48, epw - 48 - 28 - 40, 28, 40
         table_header(
@@ -418,19 +687,31 @@ def generate_invoice_pdf(invoice):
             new_x="LMARGIN", new_y="NEXT",
         )
 
-    summary_row("Total amount", booking.total_amount)
-    summary_row("Paid so far", booking.paid_amount)
+    # The invoice's own frozen figures — not the booking's live ones, which
+    # keep moving as the customer pays (QA M2).
+    summary_row("Total amount", invoice.total_amount)
+    summary_row("Paid so far", invoice.paid_amount)
     summary_row(
-        "Due amount", booking.due_amount, bold=True, fill=NAVY, text=(255, 255, 255)
+        "Due amount", invoice.due_amount, bold=True, fill=NAVY, text=(255, 255, 255)
     )
 
-    if booking.due_amount <= 0:
+    if invoice.fully_paid:
         pdf.ln(3)
         pdf.set_x(box_x)
         pdf.set_font("NotoSans", "B", 11)
         pdf.set_text_color(255, 255, 255)
         pdf.set_fill_color(*GREEN)
         pdf.cell(box_w, 9, "PAID IN FULL — সম্পূর্ণ পরিশোধিত", align="C", fill=True,
+                 new_x="LMARGIN", new_y="NEXT")
+    elif invoice.booking_status == Booking.Status.CANCELLED:
+        # A cancelled booking has due==0 because the balance is uncollectable,
+        # NOT because it was settled. Say so, rather than implying payment.
+        pdf.ln(3)
+        pdf.set_x(box_x)
+        pdf.set_font("NotoSans", "B", 10)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_fill_color(150, 40, 40)
+        pdf.cell(box_w, 9, "BOOKING CANCELLED", align="C", fill=True,
                  new_x="LMARGIN", new_y="NEXT")
 
     # ── Authorized signature ───────────────────────────────────────────────

@@ -26,6 +26,11 @@ BOOKING_PUBLIC_FIELDS = {
     "total_amount",
     "paid_amount",
     "due_amount",
+    "min_first_payment",
+    # The balance deadline, as a date the customer can actually see — it is
+    # enforced at payment time, so it must be visible before it bites (QA H8).
+    "balance_due_at",
+    "balance_deadline_passed",
 }
 
 

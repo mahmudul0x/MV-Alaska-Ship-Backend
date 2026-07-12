@@ -7,11 +7,7 @@ the PDF if the file is missing (e.g. after a redeploy on ephemeral storage).
 from django.core.files.base import ContentFile
 from django.core.management.base import BaseCommand
 
-from apps.bookings.invoices import (
-    generate_invoice_pdf,
-    invoice_number,
-    send_invoice_email,
-)
+from apps.bookings.invoices import generate_invoice_pdf, send_invoice_email
 from apps.bookings.models import Invoice
 
 
@@ -28,15 +24,18 @@ class Command(BaseCommand):
                 if not invoice.pdf_file or not invoice.pdf_file.storage.exists(
                     invoice.pdf_file.name
                 ):
+                    # Regenerating is safe: the PDF renders from the invoice's
+                    # own frozen figures + the booking's price snapshot, so a
+                    # re-render years later is byte-for-byte the same document.
                     invoice.pdf_file.save(
-                        f"{invoice_number(invoice)}.pdf",
+                        f"{invoice.number}.pdf",
                         ContentFile(generate_invoice_pdf(invoice)),
                         save=True,
                     )
                 send_invoice_email(invoice)
                 sent += 1
-                self.stdout.write(f"sent {invoice_number(invoice)}")
+                self.stdout.write(f"sent {invoice.number}")
             except Exception as exc:  # keep going; cron retries next run
                 failed += 1
-                self.stderr.write(f"failed {invoice_number(invoice)}: {exc}")
+                self.stderr.write(f"failed {invoice.number}: {exc}")
         self.stdout.write(self.style.SUCCESS(f"{sent} sent, {failed} failed."))

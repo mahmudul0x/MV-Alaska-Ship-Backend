@@ -7,4 +7,8 @@ Pillow>=10.0
 requests>=2.31
 fpdf2>=2.7
 uharfbuzz>=0.39
+# Read the embedded fonts' cmaps so a glyph we cannot draw is caught, not
+# silently dropped from the invoice (a name in an unsupported script would
+# otherwise render as a blank field).
+fonttools>=4.50
 djangorestframework-simplejwt>=5.3

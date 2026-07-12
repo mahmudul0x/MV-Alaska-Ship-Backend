@@ -6,7 +6,7 @@ from django.core.management import call_command
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from apps.testing import ThrottlelessTestMixin
+from apps.testing import ThrottlelessTestMixin, sign_ipn
 
 from .models import Booking, Payment
 from .sslcommerz import GatewayError
@@ -68,11 +68,13 @@ class PaymentTestCase(ThrottlelessTestMixin, APITestCase):
         ) as mock_validate:
             response = self.client.post(
                 "/api/payments/ipn/",
-                {
-                    "tran_id": payment.transaction_id,
-                    "val_id": "VAL123",
-                    "status": ipn_status,
-                },
+                sign_ipn(
+                    {
+                        "tran_id": payment.transaction_id,
+                        "val_id": "VAL123",
+                        "status": ipn_status,
+                    }
+                ),
             )
         return response, mock_validate
 
@@ -98,14 +100,31 @@ class InitiatePaymentTests(PaymentTestCase):
             ({"payment_type": "partial", "amount": "0"}, "amount"),  # zero
             ({"payment_type": "partial", "amount": "-5"}, "amount"),  # negative
             ({"payment_type": "partial", "amount": "9500.01"}, "amount"),  # > due
+            # Below the package's minimum first deposit (50% of 9500 = 4750).
+            ({"payment_type": "partial", "amount": "4749.99"}, "amount"),
+            ({"payment_type": "partial", "amount": "0.01"}, "amount"),
         ]
         for payload, field in cases:
             response = self.initiate(booking, payload)
             self.assertEqual(response.status_code, 400, payload)
             self.assertIn(field, response.data)
-        ok = self.initiate(booking, {"payment_type": "partial", "amount": "3000"})
+        # Exactly the floor is accepted.
+        ok = self.initiate(booking, {"payment_type": "partial", "amount": "4750"})
         self.assertEqual(ok.status_code, 200)
-        self.assertEqual(ok.data["amount"], "3000.00")
+        self.assertEqual(ok.data["amount"], "4750.00")
+
+    def test_top_up_below_the_deposit_floor_is_allowed(self):
+        """The min-deposit floor applies to the FIRST payment only — paying
+        down an existing balance in small amounts must stay possible."""
+        booking = self.make_booking()
+        first = self.initiate(booking, {"payment_type": "partial", "amount": "5000"})
+        self.assertEqual(first.status_code, 200)
+        payment = Payment.objects.get(transaction_id=first.data["tran_id"])
+        self.send_ipn(payment)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.PARTIALLY_PAID)
+        top_up = self.initiate(booking, {"payment_type": "partial", "amount": "100"})
+        self.assertEqual(top_up.status_code, 200)
 
     def test_cancelled_booking_cannot_pay(self):
         booking = self.make_booking()
@@ -150,7 +169,7 @@ class ProcessResultTests(PaymentTestCase):
 
     def test_valid_ipn_credits_payment_and_updates_booking(self):
         booking = self.make_booking()
-        payment = self.start_payment(booking, "3000")
+        payment = self.start_payment(booking, "5000")
         response, _ = self.send_ipn(payment)
         self.assertEqual(response.status_code, 200)
 
@@ -158,15 +177,15 @@ class ProcessResultTests(PaymentTestCase):
         booking.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.SUCCESS)
         self.assertIsNotNone(payment.paid_at)
-        self.assertEqual(booking.paid_amount, Decimal("3000.00"))
-        self.assertEqual(booking.due_amount, Decimal("6500.00"))
+        self.assertEqual(booking.paid_amount, Decimal("5000.00"))
+        self.assertEqual(booking.due_amount, Decimal("4500.00"))
         self.assertEqual(booking.status, Booking.Status.PARTIALLY_PAID)
 
     def test_second_partial_payment_reaches_fully_paid(self):
         booking = self.make_booking()
-        first = self.start_payment(booking, "3000")
+        first = self.start_payment(booking, "5000")
         self.send_ipn(first)
-        second = self.start_payment(booking, "6500")
+        second = self.start_payment(booking, "4500")
         self.send_ipn(second)
 
         booking.refresh_from_db()
@@ -176,7 +195,7 @@ class ProcessResultTests(PaymentTestCase):
 
     def test_duplicate_ipn_credits_only_once(self):
         booking = self.make_booking()
-        payment = self.start_payment(booking, "3000")
+        payment = self.start_payment(booking, "5000")
         verdict = self.verdict(payment)
         total_validations = 0
         for _ in range(5):
@@ -184,13 +203,13 @@ class ProcessResultTests(PaymentTestCase):
             total_validations += mock_validate.call_count
 
         booking.refresh_from_db()
-        self.assertEqual(booking.paid_amount, Decimal("3000.00"))
+        self.assertEqual(booking.paid_amount, Decimal("5000.00"))
         self.assertEqual(Payment.objects.filter(booking=booking).count(), 1)
         self.assertEqual(total_validations, 1)  # 4 duplicates gated before validation
 
     def test_amount_tampering_rejected(self):
         booking = self.make_booking()
-        payment = self.start_payment(booking, "3000")
+        payment = self.start_payment(booking, "5000")
         response, _ = self.send_ipn(
             payment, verdict=self.verdict(payment, amount="1.00")
         )
@@ -203,7 +222,7 @@ class ProcessResultTests(PaymentTestCase):
 
     def test_invalid_verdict_rejected(self):
         booking = self.make_booking()
-        payment = self.start_payment(booking, "3000")
+        payment = self.start_payment(booking, "5000")
         self.send_ipn(payment, verdict=self.verdict(payment, status="INVALID"))
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.FAILED)
@@ -214,7 +233,9 @@ class ProcessResultTests(PaymentTestCase):
         with patch("apps.bookings.sslcommerz.validate_payment") as mock_validate:
             response = self.client.post(
                 "/api/payments/ipn/",
-                {"tran_id": "BK-FAKE-P999", "val_id": "V1", "status": "VALID"},
+                sign_ipn(
+                    {"tran_id": "BK-FAKE-P999", "val_id": "V1", "status": "VALID"}
+                ),
             )
         self.assertEqual(response.status_code, 200)
         mock_validate.assert_not_called()
@@ -222,17 +243,34 @@ class ProcessResultTests(PaymentTestCase):
 
     def test_failed_ipn_status_closes_pending_payment(self):
         booking = self.make_booking()
-        payment = self.start_payment(booking, "3000")
+        payment = self.start_payment(booking, "5000")
         self.client.post(
             "/api/payments/ipn/",
-            {"tran_id": payment.transaction_id, "val_id": "V1", "status": "FAILED"},
+            sign_ipn(
+                {
+                    "tran_id": payment.transaction_id,
+                    "val_id": "V1",
+                    "status": "FAILED",
+                }
+            ),
         )
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.FAILED)
 
+    def test_unsigned_failed_ipn_is_rejected(self):
+        booking = self.make_booking()
+        payment = self.start_payment(booking, "5000")
+        response = self.client.post(
+            "/api/payments/ipn/",
+            {"tran_id": payment.transaction_id, "val_id": "V1", "status": "FAILED"},
+        )
+        self.assertEqual(response.status_code, 400)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
     def test_stray_fail_cannot_undo_verified_success(self):
         booking = self.make_booking()
-        payment = self.start_payment(booking, "3000")
+        payment = self.start_payment(booking, "5000")
         self.send_ipn(payment)
         self.client.post(
             "/api/payments/fail/", {"tran_id": payment.transaction_id}
@@ -240,7 +278,7 @@ class ProcessResultTests(PaymentTestCase):
         payment.refresh_from_db()
         booking.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.SUCCESS)
-        self.assertEqual(booking.paid_amount, Decimal("3000.00"))
+        self.assertEqual(booking.paid_amount, Decimal("5000.00"))
 
 
 class RedirectViewTests(PaymentTestCase):
@@ -265,20 +303,44 @@ class RedirectViewTests(PaymentTestCase):
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.FULLY_PAID)
 
-    def test_cancel_redirect_marks_payment_cancelled(self):
+    def test_cancel_redirect_closes_payment_only_on_gateway_confirmation(self):
         booking = self.make_booking()
         payment = Payment.objects.get(
             transaction_id=self.initiate(booking, {"payment_type": "full"}).data[
                 "tran_id"
             ]
         )
-        response = self.client.post(
-            "/api/payments/cancel/", {"tran_id": payment.transaction_id}
-        )
+        # Gateway confirms the attempt was cancelled → payment is closed.
+        with patch(
+            "apps.bookings.sslcommerz.query_transaction",
+            return_value=[{"status": "CANCELLED"}],
+        ):
+            response = self.client.post(
+                "/api/payments/cancel/", {"tran_id": payment.transaction_id}
+            )
         self.assertEqual(response.status_code, 302)
         self.assertIn("/payment/cancel?booking=", response.url)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.CANCELLED)
+
+    def test_redirect_without_gateway_confirmation_leaves_payment_pending(self):
+        """The fail/cancel redirect is attacker-controllable — with no
+        gateway record confirming the session died, nothing changes."""
+        booking = self.make_booking()
+        payment = Payment.objects.get(
+            transaction_id=self.initiate(booking, {"payment_type": "full"}).data[
+                "tran_id"
+            ]
+        )
+        with patch(
+            "apps.bookings.sslcommerz.query_transaction", return_value=[]
+        ):
+            response = self.client.post(
+                "/api/payments/fail/", {"tran_id": payment.transaction_id}
+            )
+        self.assertEqual(response.status_code, 302)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
 
 
 class ExpireStaleBookingsTests(PaymentTestCase):
@@ -308,7 +370,7 @@ class ExpireStaleBookingsTests(PaymentTestCase):
 
     def test_partially_paid_and_fresh_bookings_untouched(self):
         paid = self.make_booking()
-        payment = self.start_payment_for(paid, "3000")
+        payment = self.start_payment_for(paid, "5000")
         self.send_ipn(payment)
         self.age_booking(paid, 60)
 

@@ -5,11 +5,12 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import Q, Sum
+from django.utils import timezone
 
 from apps.packages.models import Package, PackageRoom
 from apps.ships.models import Room
 
-from .pricing import calculate_total
+from .pricing import price_breakdown, snapshot_breakdown
 
 
 def generate_booking_code():
@@ -45,6 +46,13 @@ class Booking(models.Model):
     total_amount = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal("0.00")
     )
+    # Frozen copy of the price_breakdown() that produced total_amount, taken
+    # when the booking is priced. KidPricingRule and Package.adult_price are
+    # admin-editable by design, so recomputing the breakdown at render time
+    # would re-price an already-paid booking and the invoice's line items
+    # would stop summing to what the customer was actually charged (QA M1).
+    # total_amount stays the money truth; this is the itemisation of it.
+    price_snapshot = models.JSONField(default=dict, blank=True)
     paid_amount = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal("0.00")
     )
@@ -54,6 +62,18 @@ class Booking(models.Model):
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING
     )
+    # "We owe this customer money" is first-class, queryable state — never
+    # just a log line. Set automatically whenever a booking with real money
+    # on it is cancelled, or a verified payment settles on a dead session.
+    # Refunds themselves are manual (phone/bKash); staff clear the flag once
+    # the customer has been paid back.
+    refund_required = models.BooleanField(default=False)
+    refund_note = models.TextField(
+        blank=True, help_text="Why a refund is owed / how it was settled."
+    )
+    # Set by enforce_due_deadlines when the balance reminder email goes out,
+    # so the customer is nagged exactly once per booking.
+    due_reminder_sent_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -65,6 +85,13 @@ class Booking(models.Model):
                 fields=["package", "room"],
                 condition=~Q(status="cancelled"),
                 name="uniq_active_booking_per_package_room",
+            ),
+            # No code path may ever persist a negative due — overpayment must
+            # be rejected upstream (public and staff APIs both enforce the
+            # ceiling; this is the backstop for future/raw ORM paths).
+            models.CheckConstraint(
+                condition=Q(due_amount__gte=0),
+                name="booking_due_amount_non_negative",
             ),
         ]
 
@@ -116,14 +143,77 @@ class Booking(models.Model):
             raise ValidationError(errors)
 
         # Server-side pricing — client-submitted amounts are never trusted.
-        self.total_amount = calculate_total(
-            room_type, self.package, self.adult_count, self.kid_ages
-        )
+        # Price once and keep BOTH outputs: the total (money) and the frozen
+        # itemisation that explains it.
+        #
+        # A booking is priced at creation and re-priced only while NO money has
+        # been quoted to the gateway against it. Pricing inputs (adult_price,
+        # base_price, KidPricingRule) are admin-editable by design, so a later
+        # re-price would rewrite what a paying customer owes. paid_amount > 0 is
+        # not a sufficient guard: a live PENDING session is money in flight
+        # while paid_amount is still 0.00, and re-pricing then means the
+        # customer is charged the amount they authorised but credited against a
+        # different total — or, if the price DROPPED, due goes negative and the
+        # non-negative CheckConstraint 500s the IPN and strands their money
+        # (QA C7). So any payment that is PENDING or SUCCESS freezes the price.
+        if self.paid_amount <= 0 and not self._has_money_in_flight():
+            breakdown = price_breakdown(
+                room_type, self.package, self.adult_count, self.kid_ages
+            )
+            self.total_amount = breakdown["total"]
+            self.price_snapshot = snapshot_breakdown(breakdown)
 
-    def save(self, *args, changed_by=None, **kwargs):
+    def _has_money_in_flight(self):
+        """True if any gateway session has been handed out for this booking —
+        i.e. an amount has been quoted to a customer and may still settle."""
+        if not self.pk:
+            return False
+        return self.payments.filter(
+            status__in=(Payment.Status.PENDING, Payment.Status.SUCCESS)
+        ).exists()
+
+    def save(self, *args, changed_by=None, silent=False, **kwargs):
+        """silent=True suppresses the customer-facing cancellation email — used
+        only by expire_stale_bookings, which reaps abandoned checkouts that the
+        visitor never considered a booking (QA M6)."""
         if not self.booking_code:
             self.booking_code = generate_booking_code()
-        self.due_amount = self.total_amount - self.paid_amount
+        # A cancelled booking has no collectable balance — nobody owes it
+        # money and its room is released. paid_amount is kept intact: it is
+        # the refund-owed signal.
+        #
+        # due is CLAMPED at zero. Overpayment is rejected upstream on every
+        # write path, so paid > total should be unreachable — but the
+        # non-negative CheckConstraint is an integrity net of last resort, and
+        # a customer's settling payment must never be the thing that collides
+        # with it: that turns a data bug into a 500 on the IPN, which strands
+        # real money at the gateway and makes SSLCommerz retry forever (QA C7).
+        # Any excess is money we owe back, so it is flagged rather than dropped.
+        if self.status == self.Status.CANCELLED:
+            self.due_amount = Decimal("0.00")
+        else:
+            self.due_amount = max(
+                self.total_amount - self.paid_amount, Decimal("0.00")
+            )
+            if self.paid_amount > self.total_amount and not self.refund_required:
+                self.refund_required = True
+                overpaid = self.paid_amount - self.total_amount
+                note = (
+                    f"Paid {self.paid_amount} BDT against a total of "
+                    f"{self.total_amount} BDT — {overpaid} BDT overpaid. "
+                    "Refund the excess to the customer manually."
+                )
+                self.refund_note = (
+                    f"{self.refund_note}\n{note}" if self.refund_note else note
+                )
+                update_fields = kwargs.get("update_fields")
+                if update_fields is not None:
+                    kwargs["update_fields"] = list(
+                        dict.fromkeys(
+                            list(update_fields)
+                            + ["refund_required", "refund_note"]
+                        )
+                    )
 
         old_status = None
         if self.pk:
@@ -132,6 +222,26 @@ class Booking(models.Model):
                 .values_list("status", flat=True)
                 .first()
             )
+
+        # Cancelling a booking that has verified money on it always owes the
+        # customer a call (and possibly money back, per the cancellation-charge
+        # schedule). Flag it here so every cancel path — staff API, admin,
+        # deadline enforcement — is covered without remembering to opt in.
+        if (
+            self.status == self.Status.CANCELLED
+            and old_status not in (None, self.Status.CANCELLED)
+            and self.paid_amount > 0
+            and not self.refund_required
+        ):
+            self.refund_required = True
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None and "refund_required" not in update_fields:
+                kwargs["update_fields"] = list(update_fields) + ["refund_required"]
+        # due_amount is recomputed above on every save; a partial update that
+        # touches status/paid must persist it too.
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "due_amount" not in update_fields:
+            kwargs["update_fields"] = list(update_fields) + ["due_amount"]
         super().save(*args, **kwargs)
 
         if old_status != self.status:
@@ -141,6 +251,30 @@ class Booking(models.Model):
                 new_status=self.status,
                 changed_by=changed_by,
             )
+            # Every deliberate cancel path — deadline cron, staff API, Django
+            # admin — tells the customer, without having to opt in (QA M3).
+            # After commit so email trouble can never roll the cancellation
+            # back.
+            #
+            # EXCEPT the expiry of an abandoned checkout, which passes
+            # silent=True. A visitor who closed the tab before paying never had
+            # a booking as far as they are concerned; mailing them "your booking
+            # has been cancelled", citing a deposit and a cancellation-charge
+            # schedule, is confusing, and at ~every abandoned cart it is a
+            # deliverability risk on the domain we send real invoices from
+            # (QA M6). An abandoned-cart nudge, if the client wants one, is a
+            # different message with different copy.
+            if (
+                self.status == self.Status.CANCELLED
+                and old_status is not None
+                and old_status != self.Status.CANCELLED
+                and not silent
+            ):
+                from . import invoices
+
+                transaction.on_commit(
+                    lambda: invoices.send_cancellation_email(self)
+                )
 
     def refresh_paid_amount(self):
         """Recompute paid/due from successful payments (never incremented) and
@@ -211,7 +345,24 @@ class Payment(models.Model):
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.PENDING
     )
+    # The gateway checkout URL handed to the customer. Kept so an identical
+    # re-request (double-click, back button, reopened tab) is answered with
+    # the SAME live session instead of minting a second payable one — an
+    # SSLCommerz session cannot be voided once issued (QA H4).
+    gateway_url = models.URLField(max_length=500, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
+    # Set by reconcile_pending_payments when the gateway will not say what
+    # happened on this session. A payment stuck here blocks its room from
+    # being released, so it must be escalated to a human, never left to spin
+    # silently (QA H5).
+    reconcile_attempts = models.PositiveSmallIntegerField(default=0)
+    last_reconcile_error = models.TextField(blank=True)
+    needs_manual_review = models.BooleanField(default=False)
+    # When the gateway was last asked about this payment. Escalated payments
+    # are retried on a slow back-off rather than abandoned (QA H7) — a gateway
+    # outage ends, and a payment we stop asking about holds its cabin out of
+    # inventory forever. This is the key that back-off is measured from.
+    last_reconcile_at = models.DateTimeField(null=True, blank=True)
     gateway_payload = models.JSONField(
         default=dict, blank=True, help_text="Raw gateway (SSLCommerz) response."
     )
@@ -227,6 +378,15 @@ class Payment(models.Model):
                 condition=~Q(transaction_id=""),
                 name="uniq_payment_transaction_id",
             ),
+            # Payment.clean() rejects non-positive amounts, but DRF serializers
+            # never call clean() — this makes the rule un-bypassable from any
+            # ORM path (staff API, admin, shell, future code). A mis-keyed
+            # negative "payment" would silently erase settled money from the
+            # ledger; reversals must be explicit operations, not negative rows.
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="payment_amount_positive",
+            ),
         ]
 
     def __str__(self):
@@ -241,6 +401,19 @@ class Payment(models.Model):
         self.booking.refresh_paid_amount()
 
 
+def invoice_pdf_path(invoice, filename):
+    """Storage path for an invoice PDF.
+
+    The old scheme was invoices/INV-<booking_code>-<pk>.pdf — fully derivable
+    from data the customer already has (the booking code is in their own
+    confirmation URL and email) plus a small sequential integer, so one
+    customer could enumerate everyone else's invoices (QA C1). The file now
+    lives behind an unguessable token, which also means a leaked link cannot
+    be walked to a *different* invoice.
+    """
+    return f"invoices/{invoice.access_token}.pdf"
+
+
 class Invoice(models.Model):
     class SentVia(models.TextChoices):
         EMAIL = "email", "Email"
@@ -249,15 +422,93 @@ class Invoice(models.Model):
     booking = models.ForeignKey(
         Booking, on_delete=models.CASCADE, related_name="invoices"
     )
+    # What this invoice is an invoice *for*. An invoice attests to money
+    # received, so it is issued against the payment that settled — not floating
+    # free against the booking, where nothing bounded how many could exist or
+    # whether any money backed them at all (QA M3). Nullable only so the
+    # migration can adopt pre-existing rows.
+    payment = models.ForeignKey(
+        Payment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="invoices",
+    )
+    # Issued number, stored — not derived at render time. A rendered number
+    # would change if the row moved, and could not be constrained by the DB.
+    number = models.CharField(max_length=40, unique=True, editable=False, blank=True)
+    # Unguessable capability token: it names the PDF on disk and authorises the
+    # customer's own download link. secrets.token_urlsafe(32) ≈ 256 bits.
+    access_token = models.CharField(
+        max_length=64, unique=True, editable=False, blank=True
+    )
+    # The money this invoice ATTESTS TO, frozen at issue time. The booking's
+    # live totals move (the customer keeps paying); an issued invoice must not.
+    # Both the PDF and its covering email read these, so they can never
+    # contradict each other (QA M2).
+    total_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0.00")
+    )
+    paid_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0.00")
+    )
+    due_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0.00")
+    )
+    booking_status = models.CharField(max_length=20, blank=True)
     sent_via = models.CharField(
         max_length=10, choices=SentVia.choices, default=SentVia.EMAIL
     )
     sent_at = models.DateTimeField(null=True, blank=True)
-    pdf_file = models.FileField(upload_to="invoices/", blank=True)
+    pdf_file = models.FileField(upload_to=invoice_pdf_path, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"Invoice for {self.booking.booking_code} via {self.sent_via}"
+        return f"{self.number} ({self.booking.booking_code})"
+
+    @property
+    def fully_paid(self):
+        """PAID IN FULL is a statement about the booking's STATUS, not merely
+        about due==0: a cancelled booking also has due==0 (it is uncollectable,
+        not settled), and stamping 'PAID IN FULL' on it was wrong (QA M3).
+
+        booking_status is blank only on rows issued before it existed; those
+        fall back to the booking's live status."""
+        status = self.booking_status or self.booking.status
+        return status == Booking.Status.FULLY_PAID
+
+    def save(self, *args, **kwargs):
+        if not self.access_token:
+            self.access_token = secrets.token_urlsafe(32)
+        if not self.number:
+            self.number = self._next_number()
+        super().save(*args, **kwargs)
+
+    def _next_number(self):
+        """Gapless-per-year sequential number: INV-<YYYY>-<00001>.
+
+        Allocated under a row lock on the counter so two concurrent invoices
+        can never draw the same number — an accounting series must be
+        sequential and unique, which a pk-derived string was not (QA note).
+        """
+        year = timezone.localdate().year
+        with transaction.atomic():
+            counter, _ = InvoiceCounter.objects.select_for_update().get_or_create(
+                year=year
+            )
+            counter.last_number += 1
+            counter.save(update_fields=["last_number"])
+            return f"INV-{year}-{counter.last_number:05d}"
+
+
+class InvoiceCounter(models.Model):
+    """Per-year invoice sequence. One row per year; locked while allocating."""
+
+    year = models.PositiveIntegerField(primary_key=True)
+    last_number = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.year}: {self.last_number}"

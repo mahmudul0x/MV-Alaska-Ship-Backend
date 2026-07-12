@@ -1,6 +1,30 @@
 """Shared test utilities."""
 
+import hashlib
+
+from django.conf import settings
 from rest_framework.throttling import SimpleRateThrottle
+
+
+def sign_ipn(payload):
+    """Return the payload with a genuine verify_sign/verify_key pair attached
+    (SSLCommerz's documented MD5 scheme, computed with the configured store
+    password) so PaymentIPNView's signature check passes.
+
+    Tests that exercise FORGED notifications simply post without calling this
+    — those must be rejected with 400 and change nothing.
+    """
+    data = {key: str(value) for key, value in payload.items()}
+    keys = sorted(data)
+    data["verify_key"] = ",".join(keys)
+    pairs = dict(data)
+    pairs.pop("verify_key")
+    pairs["store_passwd"] = hashlib.md5(
+        settings.SSLCOMMERZ_STORE_PASSWORD.encode()
+    ).hexdigest()
+    signable = "&".join(f"{key}={pairs[key]}" for key in sorted(pairs))
+    data["verify_sign"] = hashlib.md5(signable.encode()).hexdigest()
+    return data
 
 
 class ThrottlelessTestMixin:

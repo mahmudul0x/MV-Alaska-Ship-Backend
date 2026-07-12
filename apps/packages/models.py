@@ -1,8 +1,10 @@
 from datetime import datetime, time, timedelta
+from decimal import Decimal
 
 from django.contrib.postgres.constraints import ExclusionConstraint
 from django.contrib.postgres.fields.ranges import RangeOperators
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -43,6 +45,35 @@ class Package(models.Model):
     )
     adult_price = models.DecimalField(
         max_digits=10, decimal_places=2, help_text="Charge per adult for this package."
+    )
+    # Both knobs below are business policy, so they are data (admin-editable,
+    # per sailing) — never constants in code.
+    min_deposit_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("50.00"),
+        # Bounded 1-100. This value is load-bearing for room inventory: at 0 a
+        # customer holds a cabin for one paisa, and a partially_paid booking is
+        # exempt from hold expiry — which is precisely the bug this field was
+        # added to prevent (QA C2/M5). Above 100 the floor exceeds the total and
+        # partial payment is silently impossible. Neither is a business setting.
+        validators=[
+            MinValueValidator(Decimal("1.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+        help_text=(
+            "Minimum first payment as % of the booking total, 1-100 (invoice "
+            "policy: confirmation requires a 50% advance). Top-ups toward an "
+            "existing balance are exempt."
+        ),
+    )
+    balance_due_days_before_start = models.PositiveSmallIntegerField(
+        default=3,
+        help_text=(
+            "Days before departure by which the remaining balance must be "
+            "settled (deadline is noon that day). Partially paid bookings past "
+            "the deadline are cancelled and flagged for a manual refund call."
+        ),
     )
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.DRAFT
@@ -151,10 +182,36 @@ class Package(models.Model):
                     }
                 )
 
+        # Also checked here, not only by the field validators: clean() is the
+        # gate every non-form path goes through, and a 0% floor would let one
+        # paisa hold a cabin permanently (QA M5).
+        if self.min_deposit_percent is not None and not (
+            Decimal("1") <= self.min_deposit_percent <= Decimal("100")
+        ):
+            raise ValidationError(
+                {
+                    "min_deposit_percent": (
+                        "Must be between 1 and 100. A 0% deposit would let a "
+                        "customer hold a cabin indefinitely without paying."
+                    )
+                }
+            )
+
     @staticmethod
     def cutoff_default_for(start_date):
         """Noon (Asia/Dhaka) the day before the given start date — PRD §5.5."""
         naive = datetime.combine(start_date - timedelta(days=1), time(12, 0))
+        return timezone.make_aware(naive, timezone.get_default_timezone())
+
+    def balance_due_at(self):
+        """Deadline for settling a booking's remaining balance: noon local
+        time, balance_due_days_before_start days before departure. Mirrors
+        the booking-cutoff pattern (invoice policy: "the remaining balance
+        must be settled before the journey")."""
+        naive = datetime.combine(
+            self.start_date - timedelta(days=self.balance_due_days_before_start),
+            time(12, 0),
+        )
         return timezone.make_aware(naive, timezone.get_default_timezone())
 
     def default_cutoff(self):
