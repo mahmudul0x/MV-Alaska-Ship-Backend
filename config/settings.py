@@ -69,6 +69,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
+    "anymail",
     # Local apps
     "apps.accounts",
     "apps.ships",
@@ -313,15 +314,32 @@ PAYMENT_ESCALATED_RETRY_MINUTES = env.int(
 )
 
 
-# Email — provider-agnostic SMTP config, everything from .env.
+# Email — provider-agnostic, everything from .env.
 # Dev default prints emails to the console; production sets a real backend.
+#
+# Prefer an HTTP-API backend (Resend via Anymail) in the cloud: hosts like
+# Render block outbound SMTP ports (25/465/587), so an SMTP backend hangs until
+# the gunicorn worker times out and is SIGKILLed mid-payment. Resend goes over
+# HTTPS, so it is not blocked. To use it, set on the host:
+#   EMAIL_BACKEND=anymail.backends.resend.EmailBackend
+#   RESEND_API_KEY=<your key>
+#   DEFAULT_FROM_EMAIL=MV Alaska <onboarding@resend.dev>   (or your verified domain)
 
 EMAIL_BACKEND = env(
     "EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend"
 )
+# Belt-and-suspenders: cap any SMTP backend so a blocked port can never hold a
+# worker past gunicorn's timeout again. Ignored by the HTTP (Resend) backend.
+EMAIL_TIMEOUT = env.int("EMAIL_TIMEOUT", default=10)
 EMAIL_HOST = env("EMAIL_HOST", default="")
 EMAIL_PORT = env.int("EMAIL_PORT", default=587)
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="MV Alaska <noreply@localhost>")
+
+# Anymail (Resend) — API key only from env. Harmless when the console/SMTP
+# backend is in use.
+ANYMAIL = {
+    "RESEND_API_KEY": env("RESEND_API_KEY", default=""),
+}
