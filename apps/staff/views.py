@@ -388,6 +388,10 @@ class StaffPaymentViewSet(
         )
 
 
+# These settings viewsets back small, bounded config tables the dashboard shows
+# whole and reads as bare arrays; opt out of the project-wide default paginator
+# so their response shape stays a plain list (QA phase8b F3). The paginated
+# resources (packages/bookings/payments/rooms/invoices) set StaffPagination.
 class StaffShipViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -398,12 +402,14 @@ class StaffShipViewSet(
     seed migration / Django admin, so no create or delete here."""
 
     permission_classes = [IsAdminUser]
+    pagination_class = None
     serializer_class = StaffShipSerializer
     queryset = Ship.objects.all().order_by("name")
 
 
 class StaffRoomTypeViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
+    pagination_class = None
     serializer_class = StaffRoomTypeSerializer
     queryset = RoomType.objects.all().order_by("max_adults")
 
@@ -421,12 +427,14 @@ class StaffRoomViewSet(viewsets.ModelViewSet):
 
 class StaffKidPricingRuleViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
+    pagination_class = None
     serializer_class = StaffKidPricingRuleSerializer
     queryset = KidPricingRule.objects.all().order_by("min_age")
 
 
 class StaffFoodMenuItemViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
+    pagination_class = None
     serializer_class = StaffFoodMenuItemSerializer
     queryset = FoodMenuItem.objects.select_related("ship").order_by(
         "ship", "day", "meal_type", "order", "id"

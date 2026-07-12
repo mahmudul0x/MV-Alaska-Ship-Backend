@@ -6,6 +6,7 @@ from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.bookings.models import Booking
@@ -19,6 +20,16 @@ from .serializers import (
 
 
 class PackageViewSet(viewsets.ReadOnlyModelViewSet):
+    # Public list is a small, bounded set (a few open sailings) the frontend
+    # reads as a bare array; opt out of the project-wide default paginator so
+    # its response stays a plain list (QA phase8b F3). The default protects
+    # future endpoints; this one is intentionally whole.
+    pagination_class = None
+    # Read-only browsing + the availability (`rooms`) search get the generous
+    # `read` bucket, not the shared 100/min anon one (QA phase8b F1).
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "read"
+
     def get_queryset(self):
         return Package.objects.public().select_related("ship").order_by("start_date")
 
@@ -50,6 +61,11 @@ class CalendarView(APIView):
     Every day of a package's start–end range that falls inside the requested
     month is listed, so packages spanning a month boundary show up in both.
     """
+
+    # Read-only browsing endpoint — same generous bucket as package/availability
+    # browsing rather than the shared anon budget (QA phase8b F1).
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "read"
 
     def get(self, request):
         # Asia/Dhaka "today", like every other availability decision — the

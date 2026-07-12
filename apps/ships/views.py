@@ -1,6 +1,7 @@
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 
 from .models import RoomType, Ship
 from .serializers import (
@@ -12,6 +13,12 @@ from .serializers import (
 
 
 class ShipViewSet(viewsets.ReadOnlyModelViewSet):
+    # Tiny bounded catalog the frontend reads as a bare array — opt out of the
+    # project-wide default paginator (QA phase8b F3). Read-only browsing, so the
+    # generous `read` throttle bucket, not the shared anon one (QA phase8b F1).
+    pagination_class = None
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "read"
     queryset = Ship.objects.filter(status=Ship.Status.ACTIVE)
     serializer_class = ShipSerializer
 
@@ -33,5 +40,11 @@ class RoomTypeViewSet(viewsets.ReadOnlyModelViewSet):
     like /cabins — availability is always package-specific, so this is
     static catalog data only (base_price, pax limits), never bookings."""
 
+    # Static catalog (2/3/4-person), read as a bare array by the frontend —
+    # opt out of the project-wide default paginator (QA phase8b F3), and use the
+    # generous read-only throttle bucket (QA phase8b F1).
+    pagination_class = None
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "read"
     queryset = RoomType.objects.all().order_by("max_adults")
     serializer_class = RoomTypeSerializer

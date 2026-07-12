@@ -40,12 +40,13 @@ class ThrottlelessTestMixin:
     def setUpClass(cls):
         super().setUpClass()
         cls._saved_throttle_rates = SimpleRateThrottle.THROTTLE_RATES
-        SimpleRateThrottle.THROTTLE_RATES = {
-            "anon": None,
-            "booking": None,
-            "quote": None,
-            "login": None,
-        }
+        # Map EVERY configured scope to None, not a hardcoded subset: a
+        # ScopedRateThrottle whose scope is absent from THROTTLE_RATES raises
+        # KeyError (→ 500) instead of being disabled, so a new scope in settings
+        # (e.g. "read"/"status") would silently break unrelated tests. Deriving
+        # the keys from settings keeps this allowlist from going stale.
+        configured = settings.REST_FRAMEWORK.get("DEFAULT_THROTTLE_RATES", {})
+        SimpleRateThrottle.THROTTLE_RATES = {scope: None for scope in configured}
 
     @classmethod
     def tearDownClass(cls):

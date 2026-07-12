@@ -169,6 +169,12 @@ CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
+    # Defensive default so no list endpoint can ever return an unbounded set by
+    # omission (QA phase8b F3). Staff viewsets set their own StaffPagination;
+    # endpoints that must return a whole set (the package room map) opt out
+    # explicitly with pagination_class = None.
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 50,
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
@@ -179,6 +185,20 @@ REST_FRAMEWORK = {
         # Live price previews (quote) — fired per guest-count change in the
         # wizard, so far looser than actual booking creation.
         "quote": "60/min",
+        # Read-only availability/calendar/package browsing. These are cheap,
+        # cacheable-shaped GETs and are the two moments a 429 is most damaging
+        # (discovery, and the post-payment status poll) — so they get their own
+        # generous bucket instead of sharing the 100/min anon budget. That
+        # budget is keyed on the real client IP, so several customers behind one
+        # NAT/carrier IP browsing availability could otherwise collectively trip
+        # it mid-booking (QA phase8b F1). Abuse of a read-only endpoint has no
+        # upside to prevent the way hammering `create` does.
+        "read": "600/min",
+        # The frontend polls the booking-status GET every 2s up to ~6 times
+        # after payment (useBooking pollWhilePending). Give it headroom so a
+        # legitimate poll is never throttled, even with the wizard traffic that
+        # precedes it on the same IP.
+        "status": "120/min",
         # Staff login + token refresh: tight bucket to blunt credential
         # stuffing / password spraying against the admin dashboard. Keyed on
         # the real client IP (NUM_PROXIES set below), not a spoofable header.

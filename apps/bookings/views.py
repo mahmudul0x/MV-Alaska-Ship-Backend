@@ -33,10 +33,19 @@ class BookingViewSet(
     throttle_scope = "booking"
 
     def get_throttles(self):
-        # The wizard fires a quote on every pax change; those previews must
-        # not drain the (much stricter) booking-creation budget.
+        # Per-action buckets so cheap reads never drain the strict
+        # booking-creation budget (default "booking", 10/min):
+        #   quote           — fired on every pax change in the wizard.
+        #   retrieve        — the post-payment status poll (every 2s ×~6) plus
+        #     confirmation-page reads; a 429 here shows a just-paid customer a
+        #     stuck state, so it gets its own generous "status" bucket
+        #     (QA phase8b F1).
+        #   invoices        — read-only list of the customer's own invoices.
+        # create and pay are mutations and keep the strict "booking" scope.
         if self.action == "quote":
             self.throttle_scope = "quote"
+        elif self.action in ("retrieve", "invoices"):
+            self.throttle_scope = "status"
         return super().get_throttles()
 
     def get_serializer_class(self):

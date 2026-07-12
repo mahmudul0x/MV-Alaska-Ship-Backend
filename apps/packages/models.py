@@ -101,6 +101,14 @@ class Package(models.Model):
 
     class Meta:
         ordering = ["-start_date"]
+        indexes = [
+            # public() = status='open' AND end_date>=today runs on EVERY public
+            # read; the list/calendar order and range-filter on the dates. None
+            # of status/start_date/end_date was indexed (QA phase8b F2). ship_id
+            # already has an FK index; these cover the rest.
+            models.Index(fields=["status", "end_date"], name="package_status_end_idx"),
+            models.Index(fields=["start_date"], name="package_start_idx"),
+        ]
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(end_date__gt=models.F("start_date")),

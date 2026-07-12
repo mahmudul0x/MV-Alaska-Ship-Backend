@@ -90,6 +90,20 @@ class Booking(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            # The staff booking list sorts by -created_at and filters by status
+            # and/or package; the dashboards Count/Sum grouped by status. None of
+            # those columns was indexed, so each seq-scanned — fine at a handful
+            # of rows, but bookings accrue for every sailing forever (QA phase8b
+            # F2). (package_id/room_id already have FK indexes; availability's
+            # (package,room,status!=cancelled) lookup is served by the partial
+            # unique constraint below.)
+            models.Index(fields=["status"], name="booking_status_idx"),
+            models.Index(fields=["-created_at"], name="booking_created_idx"),
+            models.Index(
+                fields=["package", "status"], name="booking_package_status_idx"
+            ),
+        ]
         constraints = [
             # One active booking per room per package (cancelled frees the room).
             models.UniqueConstraint(
@@ -381,6 +395,18 @@ class Payment(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            # The reconcile job scans PENDING payments and the dashboard scans
+            # SUCCESS ones; status was unindexed (QA phase8b F2). A partial index
+            # on the PENDING rows keeps the reconcile queue — which decides which
+            # cabins are still held — cheap no matter how many settled payments
+            # pile up behind it (settled rows are the vast majority over time).
+            models.Index(
+                fields=["created_at"],
+                condition=Q(status="pending"),
+                name="payment_pending_idx",
+            ),
+        ]
         constraints = [
             # One payment row per gateway tran_id — duplicate IPNs can never
             # create a second credit.

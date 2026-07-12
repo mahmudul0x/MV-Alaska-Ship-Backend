@@ -21,7 +21,12 @@ def price_breakdown(room_type, package, adult_count, kid_ages):
     Room total = base_price + (adults × adult_price) + Σ kid tier charges.
     """
     adults_subtotal = package.adult_price * adult_count
-    kids = [{"age": age, "charge": kid_charge(age, package)} for age in kid_ages]
+    # Load every kid-pricing tier ONCE, not one query per child: the rules are a
+    # tiny, rarely-changing admin table, and pricing a 2-kid booking used to fire
+    # a separate KidPricingRule query per child (QA phase8b F4). Resolve each age
+    # against the in-memory set instead.
+    rules = list(KidPricingRule.objects.all())
+    kids = [{"age": age, "charge": kid_charge(age, package, rules)} for age in kid_ages]
     kids_subtotal = sum((kid["charge"] for kid in kids), ZERO)
     return {
         "room_base": room_type.base_price,
@@ -77,8 +82,19 @@ def restore_breakdown(snapshot):
     }
 
 
-def kid_charge(age, package):
-    rule = KidPricingRule.rule_for_age(age)
+def kid_charge(age, package, rules=None):
+    """Charge for one child of `age`.
+
+    `rules` is an optional preloaded list of every KidPricingRule (as loaded by
+    price_breakdown) so a multi-kid booking resolves in memory instead of one
+    query per child. When omitted, falls back to a single indexed lookup.
+    """
+    if rules is None:
+        rule = KidPricingRule.rule_for_age(age)
+    else:
+        rule = next(
+            (r for r in rules if r.min_age <= age < r.max_age), None
+        )
     if rule is None:
         raise ValidationError(
             f"No kid pricing rule covers age {age}. "
