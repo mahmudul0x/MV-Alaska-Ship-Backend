@@ -8,6 +8,7 @@ See `.env.example` for the required variables.
 from datetime import timedelta
 from pathlib import Path
 
+import dj_database_url
 import environ
 from django.core.exceptions import ImproperlyConfigured
 
@@ -19,11 +20,13 @@ env = environ.Env(
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
-SECRET_KEY = env("SECRET_KEY")
+# Local-dev defaults so the project boots without a full .env; every deployed
+# environment sets these explicitly (see the Render env-var list in DEPLOY.md).
+SECRET_KEY = env("SECRET_KEY", default="dev-insecure-secret-key-change-me")
 
 DEBUG = env("DEBUG")
 
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 
 # Fail-safe: never boot a deployed environment with DEBUG on. DEBUG=True leaks
 # tracebacks with SECRET_KEY/DB DSN/settings on any 500, and turns off every
@@ -77,6 +80,8 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    # Serves collected static files (incl. Django admin assets) in production.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -107,10 +112,22 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 
 # Database
+#
+# Supabase Transaction Pooler (port 6543): connections are handed out per
+# transaction from a shared pool, so persistent connections and server-side
+# cursors / prepared statements are NOT supported. Hence conn_max_age=0 (open
+# and close per request) and DISABLE_SERVER_SIDE_CURSORS=True (Django uses
+# client-side cursors, avoiding the "prepared statement already exists" errors
+# the pooler otherwise raises).
 
 DATABASES = {
-    "default": env.db("DATABASE_URL"),
+    "default": dj_database_url.config(
+        env="DATABASE_URL",
+        conn_max_age=0,
+    ),
 }
+
+DISABLE_SERVER_SIDE_CURSORS = True
 
 
 # Custom user model — must be set before the first migration ever runs.
@@ -150,9 +167,21 @@ USE_TZ = True
 # Static & media files
 
 STATIC_URL = "static/"
+# collectstatic gathers everything here; WhiteNoise serves it in production.
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+# WhiteNoise: compress + hash static filenames for far-future caching.
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # Default primary key field type
 

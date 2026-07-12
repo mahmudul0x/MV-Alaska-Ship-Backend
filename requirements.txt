@@ -12,3 +12,7 @@ uharfbuzz>=0.39
 # otherwise render as a blank field).
 fonttools>=4.50
 djangorestframework-simplejwt>=5.3
+# Deployment (Render + Supabase pooler)
+dj-database-url>=2.1
+gunicorn>=22.0
+whitenoise>=6.6
