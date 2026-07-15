@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.files.storage import storages
 from django.db import models, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -451,6 +452,17 @@ def invoice_pdf_path(invoice, filename):
     return f"invoices/{invoice.access_token}.pdf"
 
 
+def select_invoice_storage():
+    """Resolve the "invoices" STORAGES alias at runtime.
+
+    Invoice PDFs hold customer PII, so in production they live in their own
+    private bucket with a much shorter presigned-URL TTL than public imagery
+    (settings.STORAGES["invoices"]); locally and under test the alias is the
+    plain filesystem. A callable keeps the choice out of migrations.
+    """
+    return storages["invoices"]
+
+
 class Invoice(models.Model):
     class SentVia(models.TextChoices):
         EMAIL = "email", "Email"
@@ -497,7 +509,9 @@ class Invoice(models.Model):
         max_length=10, choices=SentVia.choices, default=SentVia.EMAIL
     )
     sent_at = models.DateTimeField(null=True, blank=True)
-    pdf_file = models.FileField(upload_to=invoice_pdf_path, blank=True)
+    pdf_file = models.FileField(
+        upload_to=invoice_pdf_path, storage=select_invoice_storage, blank=True
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

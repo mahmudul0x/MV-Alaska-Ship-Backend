@@ -20,3 +20,8 @@ whitenoise>=6.6
 # times out on Render and kills the worker — Resend uses HTTPS instead).
 resend>=2.0
 django-anymail[resend]>=11.0
+# Object storage (Backblaze B2 via its S3-compatible API). Cloud hosts have
+# ephemeral disks — uploaded images and invoice PDFs vanish on redeploy unless
+# they live in a bucket. Buckets are PRIVATE; files are served via presigned
+# URLs (see the B2 block in config/settings.py).
+django-storages[s3]>=1.14

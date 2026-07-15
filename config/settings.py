@@ -5,6 +5,8 @@ All secrets and environment-specific values come from `.env` via django-environ.
 See `.env.example` for the required variables.
 """
 
+import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -174,11 +176,87 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+
+# Object storage — Backblaze B2 via its S3-compatible API.
+#
+# Cloud hosts have ephemeral disks: anything under MEDIA_ROOT (package hero
+# images, ship layouts, invoice PDFs) is wiped on every redeploy/restart. When
+# all five B2_* variables are set, media lives in two PRIVATE buckets and every
+# URL Django hands out is a short-lived presigned URL (querystring_auth). With
+# them absent — local dev — everything falls back to the filesystem unchanged.
+#
+# Two buckets, least exposure: hero/layout images (harmless if a URL leaks,
+# long TTL so browsers can cache) vs invoice PDFs (customer PII, short TTL;
+# the customer-facing download is additionally gated by the invoice's own
+# capability token and streams through the app, not the bucket URL).
+#
+# Tests always use the filesystem: they create real files (invoice PDFs) and
+# must never depend on — or write into — a live bucket.
+
+TESTING = "test" in sys.argv
+
+B2_S3_ENDPOINT_URL = env("B2_S3_ENDPOINT_URL", default="")
+B2_ACCESS_KEY_ID = env("B2_ACCESS_KEY_ID", default="")
+B2_SECRET_ACCESS_KEY = env("B2_SECRET_ACCESS_KEY", default="")
+B2_MEDIA_BUCKET = env("B2_MEDIA_BUCKET", default="")
+B2_INVOICE_BUCKET = env("B2_INVOICE_BUCKET", default="")
+
+if B2_S3_ENDPOINT_URL and not B2_S3_ENDPOINT_URL.startswith("http"):
+    B2_S3_ENDPOINT_URL = "https://" + B2_S3_ENDPOINT_URL
+# The region is embedded in the endpoint host: s3.<region>.backblazeb2.com
+B2_REGION = env(
+    "B2_REGION",
+    default=(
+        B2_S3_ENDPOINT_URL.split("//")[-1].split(".")[1]
+        if B2_S3_ENDPOINT_URL
+        else ""
+    ),
+)
+
+USE_B2 = not TESTING and all(
+    [
+        B2_S3_ENDPOINT_URL,
+        B2_ACCESS_KEY_ID,
+        B2_SECRET_ACCESS_KEY,
+        B2_MEDIA_BUCKET,
+        B2_INVOICE_BUCKET,
+    ]
+)
+
+if USE_B2:
+    # boto3 >= 1.36 attaches CRC checksums to every request by default, which
+    # some S3-compatible providers reject. "when_required" restores the
+    # interoperable behaviour (and remains correct against real AWS).
+    os.environ.setdefault("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
+    os.environ.setdefault("AWS_RESPONSE_CHECKSUM_VALIDATION", "when_required")
+
+
+def _b2_storage(bucket_name, url_ttl_seconds):
+    return {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "endpoint_url": B2_S3_ENDPOINT_URL,
+            "access_key": B2_ACCESS_KEY_ID,
+            "secret_key": B2_SECRET_ACCESS_KEY,
+            "bucket_name": bucket_name,
+            "region_name": B2_REGION,
+            "default_acl": None,  # B2 buckets are private; no per-object ACLs
+            "querystring_auth": True,  # every URL is presigned
+            "querystring_expire": url_ttl_seconds,
+            "file_overwrite": False,  # never silently clobber an object
+            "signature_version": "s3v4",
+        },
+    }
+
+
+_FILESYSTEM = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
+
 # WhiteNoise: compress + hash static filenames for far-future caching.
 STORAGES = {
-    "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
-    },
+    "default": _b2_storage(B2_MEDIA_BUCKET, 24 * 3600) if USE_B2 else _FILESYSTEM,
+    # Invoice.pdf_file resolves this alias at runtime (see
+    # apps.bookings.models.select_invoice_storage).
+    "invoices": _b2_storage(B2_INVOICE_BUCKET, 600) if USE_B2 else _FILESYSTEM,
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
