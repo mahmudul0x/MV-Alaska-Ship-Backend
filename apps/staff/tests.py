@@ -542,3 +542,107 @@ class StaffLoginThrottleTests(APITestCase):
             {"username": "staffer", "password": "pass12345"},
         )
         self.assertEqual(blocked.status_code, 429)
+
+
+class StaffRoomImageTests(StaffApiTestCase):
+    """Room gallery management from the dashboard (Room Photos tab)."""
+
+    # 1x1 px valid GIF — enough for ImageField validation.
+    TINY_GIF = (
+        b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04"
+        b"\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D"
+        b"\x01\x00;"
+    )
+
+    def upload(self, room=None, **extra):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        payload = {
+            "room": (room or self.room_2p).pk,
+            "image": SimpleUploadedFile("r.gif", self.TINY_GIF, "image/gif"),
+            **extra,
+        }
+        return self.client.post("/api/staff/room-images/", payload, format="multipart")
+
+    def test_anonymous_and_non_staff_rejected(self):
+        response = self.client.get("/api/staff/room-images/")
+        self.assertEqual(response.status_code, 401)
+        response = self.upload()
+        self.assertEqual(response.status_code, 401)
+
+    def test_upload_list_update_delete_cycle(self):
+        self.auth()
+
+        created = self.upload(caption="Sea view", sort_order=1)
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data["caption"], "Sea view")
+        self.assertEqual(created.data["room_number"], self.room_2p.room_number)
+        self.assertTrue(created.data["image_url"])
+        self.assertNotIn("image", created.data)  # upload-only field
+
+        other = self.upload(room=self.room_4p)
+        self.assertEqual(other.status_code, 201)
+
+        # List filters by room.
+        listed = self.client.get(f"/api/staff/room-images/?room={self.room_2p.pk}")
+        self.assertEqual([i["id"] for i in listed.data], [created.data["id"]])
+
+        # PATCH edits caption/sort_order but never moves the photo to another
+        # room (silently ignored, like a read-only field).
+        patched = self.client.patch(
+            f"/api/staff/room-images/{created.data['id']}/",
+            {"caption": "Window", "sort_order": 5, "room": self.room_4p.pk},
+        )
+        self.assertEqual(patched.status_code, 200)
+        self.assertEqual(patched.data["caption"], "Window")
+        self.assertEqual(patched.data["room"], self.room_2p.pk)
+
+        deleted = self.client.delete(f"/api/staff/room-images/{created.data['id']}/")
+        self.assertEqual(deleted.status_code, 204)
+        listed = self.client.get(f"/api/staff/room-images/?room={self.room_2p.pk}")
+        self.assertEqual(listed.data, [])
+
+    def test_oversized_upload_rejected(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.auth()
+        # Pad a valid GIF past the 10 MB ceiling — content-valid, size-invalid.
+        big = SimpleUploadedFile(
+            "big.gif", self.TINY_GIF + b"\x00" * (10 * 1024 * 1024), "image/gif"
+        )
+        response = self.client.post(
+            "/api/staff/room-images/",
+            {"room": self.room_2p.pk, "image": big},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("compress", str(response.data["image"][0]))
+
+    def test_non_image_upload_rejected(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.auth()
+        response = self.client.post(
+            "/api/staff/room-images/",
+            {
+                "room": self.room_2p.pk,
+                "image": SimpleUploadedFile("evil.txt", b"not an image", "text/plain"),
+            },
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_uploaded_image_appears_in_public_room_map(self):
+        self.auth()
+        created = self.upload(caption="Balcony")
+        self.assertEqual(created.status_code, 201)
+
+        # Public, unauthenticated endpoint the customer site reads.
+        self.client.credentials()
+        response = self.client.get(f"/api/packages/{self.package.id}/rooms/")
+        self.assertEqual(response.status_code, 200)
+        by_room = {r["room_number"]: r for r in response.json()}
+        images = by_room[self.room_2p.room_number]["images"]
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["caption"], "Balcony")
+        self.assertTrue(images[0]["image"])

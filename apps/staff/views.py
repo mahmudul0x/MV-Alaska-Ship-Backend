@@ -22,7 +22,7 @@ from apps.bookings.models import Booking, Invoice, Payment
 from apps.bookings.reports import generate_guide_report_pdf
 from apps.bookings.serializers import BookingPublicSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
-from apps.ships.models import FoodMenuItem, Room, RoomType, Ship
+from apps.ships.models import FoodMenuItem, Room, RoomImage, RoomType, Ship
 
 from .serializers import (
     StaffBookingCreateSerializer,
@@ -36,6 +36,7 @@ from .serializers import (
     StaffPackageSerializer,
     StaffPaymentResolveSerializer,
     StaffPaymentSerializer,
+    StaffRoomImageSerializer,
     StaffRoomSerializer,
     StaffRoomTypeSerializer,
     StaffShipSerializer,
@@ -423,6 +424,23 @@ class StaffRoomViewSet(viewsets.ModelViewSet):
         return Room.objects.select_related("room_type", "ship").order_by(
             "floor_number", "room_number"
         )
+
+
+class StaffRoomImageViewSet(viewsets.ModelViewSet):
+    """Room gallery photos (dashboard Room Photos tab). Upload is multipart
+    POST; files land in the configured media storage (Cloudinary CDN in
+    production). Unpaginated: the whole fleet's gallery is a bounded set the
+    tab reads in one request, optionally narrowed with ?room=<id>."""
+
+    permission_classes = [IsAdminUser]
+    pagination_class = None
+    serializer_class = StaffRoomImageSerializer
+
+    def get_queryset(self):
+        qs = RoomImage.objects.select_related("room").order_by("sort_order", "id")
+        if self.request.query_params.get("room"):
+            qs = qs.filter(room_id=self.request.query_params["room"])
+        return qs
 
 
 class StaffKidPricingRuleViewSet(viewsets.ModelViewSet):

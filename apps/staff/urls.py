@@ -11,6 +11,7 @@ from .views import (
     StaffOverviewView,
     StaffPackageViewSet,
     StaffPaymentViewSet,
+    StaffRoomImageViewSet,
     StaffRoomTypeViewSet,
     StaffRoomViewSet,
     StaffShipViewSet,
@@ -24,6 +25,7 @@ router.register("bookings", StaffBookingViewSet, basename="staff-booking")
 router.register("payments", StaffPaymentViewSet, basename="staff-payment")
 router.register("room-types", StaffRoomTypeViewSet, basename="staff-room-type")
 router.register("rooms", StaffRoomViewSet, basename="staff-room")
+router.register("room-images", StaffRoomImageViewSet, basename="staff-room-image")
 router.register("kid-pricing-rules", StaffKidPricingRuleViewSet, basename="staff-kid-rule")
 router.register("food-menu-items", StaffFoodMenuItemViewSet, basename="staff-food-menu-item")
 router.register("invoices", StaffInvoiceViewSet, basename="staff-invoice")

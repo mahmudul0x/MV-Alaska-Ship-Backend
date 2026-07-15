@@ -16,7 +16,7 @@ from apps.bookings.exceptions import RoomUnavailable
 from apps.bookings.models import Booking, BookingStatusLog, Invoice, Payment
 from apps.bookings.serializers import BookingCreateSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
-from apps.ships.models import FoodMenuItem, Room, RoomType, Ship
+from apps.ships.models import FoodMenuItem, Room, RoomImage, RoomType, Ship
 
 
 class StaffTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -78,6 +78,39 @@ class StaffRoomSerializer(serializers.ModelSerializer):
     class Meta:
         model = Room
         fields = ["id", "ship", "room_type", "room_type_name", "room_number", "floor_number"]
+
+
+class StaffRoomImageSerializer(serializers.ModelSerializer):
+    """Room gallery photo, managed from the dashboard's Room Photos tab.
+
+    `image` is upload-only (multipart POST); reads carry `image_url` instead —
+    the storage URL (Cloudinary CDN in production), never the raw file path.
+    `room` is immutable after upload: moving a photo between rooms would
+    silently rewrite history for both rooms' galleries; re-upload instead.
+    """
+
+    image = serializers.ImageField(write_only=True)
+    image_url = serializers.ImageField(source="image", read_only=True, use_url=True)
+    room_number = serializers.CharField(source="room.room_number", read_only=True)
+
+    class Meta:
+        model = RoomImage
+        fields = ["id", "room", "room_number", "image", "image_url", "caption", "sort_order"]
+
+    def update(self, instance, validated_data):
+        validated_data.pop("room", None)  # immutable — see docstring
+        return super().update(instance, validated_data)
+
+    def validate_image(self, image):
+        # Uploads go straight to the CDN and out to customers' browsers — keep
+        # a sane ceiling so a 40 MB camera original can't be published as-is.
+        max_mb = 10
+        if image.size > max_mb * 1024 * 1024:
+            raise serializers.ValidationError(
+                f"Image is {image.size / (1024 * 1024):.1f} MB — please compress "
+                f"it below {max_mb} MB before uploading."
+            )
+        return image
 
 
 class StaffFoodMenuItemSerializer(serializers.ModelSerializer):
