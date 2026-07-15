@@ -75,6 +75,33 @@ class Room(models.Model):
         return f"{self.ship.name} — Room {self.room_number}"
 
 
+def room_image_path(room_image, filename):
+    """rooms/<ship_id>/<room_number>/<original name>. Keyed by ship so two
+    ships' identically numbered rooms never share a folder."""
+    room = room_image.room
+    return f"rooms/{room.ship_id}/{room.room_number}/{filename}"
+
+
+class RoomImage(models.Model):
+    """A gallery photo of a room, uploaded from the admin. Rooms carry any
+    number of images; today they surface in the room API payloads, and later
+    features (galleries, sliders, previews) read from this same table."""
+
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="images")
+    image = models.ImageField(upload_to=room_image_path)
+    caption = models.CharField(max_length=150, blank=True)
+    sort_order = models.PositiveSmallIntegerField(
+        default=0, help_text="Lower numbers show first."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    def __str__(self):
+        return f"{self.room} — image {self.pk}"
+
+
 class FoodMenuItem(models.Model):
     """A dish the chef may serve on a given day/meal. Rows are a selection
     pool, not a fixed daily assignment — the chef picks from the active

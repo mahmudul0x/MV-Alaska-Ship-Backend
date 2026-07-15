@@ -25,7 +25,14 @@ PACKAGE_LIST_FIELDS = {
     "hero_image",
     "highlights",
 }
-ROOM_FIELDS = {"id", "room_number", "floor_number", "room_type", "availability"}
+ROOM_FIELDS = {
+    "id",
+    "room_number",
+    "floor_number",
+    "room_type",
+    "images",
+    "availability",
+}
 
 
 class PackageApiTestCase(ThrottlelessTestMixin, APITestCase):
@@ -168,9 +175,10 @@ class PackageRoomsApiTests(PackageApiTestCase):
             self.assertEqual(set(room.keys()), ROOM_FIELDS)
 
     def test_rooms_endpoint_query_count_is_constant(self):
-        # One query for the package, one annotated query for all rooms —
-        # regardless of room count (N+1 guard).
-        with self.assertNumQueries(2):
+        # One query for the package, one annotated query for all rooms, one
+        # prefetch for all rooms' gallery images — regardless of room count
+        # (N+1 guard).
+        with self.assertNumQueries(3):
             self.client.get(f"/api/packages/{self.package.id}/rooms/")
 
 

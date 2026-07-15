@@ -72,6 +72,10 @@ INSTALLED_APPS = [
     "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "anymail",
+    # Media-only Cloudinary usage, so listed after staticfiles (per its docs;
+    # before staticfiles would hijack collectstatic, which stays on WhiteNoise).
+    "cloudinary_storage",
+    "cloudinary",
     # Local apps
     "apps.accounts",
     "apps.ships",
@@ -177,23 +181,33 @@ MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 
-# Object storage — Backblaze B2 via its S3-compatible API.
+# Object storage — public imagery on Cloudinary, invoice PDFs on Backblaze B2.
 #
 # Cloud hosts have ephemeral disks: anything under MEDIA_ROOT (package hero
-# images, ship layouts, invoice PDFs) is wiped on every redeploy/restart. When
-# all five B2_* variables are set, media lives in two PRIVATE buckets and every
-# URL Django hands out is a short-lived presigned URL (querystring_auth). With
-# them absent — local dev — everything falls back to the filesystem unchanged.
+# images, ship layouts, room photos, invoice PDFs) is wiped on every
+# redeploy/restart, so production media must live off-host. The split:
 #
-# Two buckets, least exposure: hero/layout images (harmless if a URL leaks,
-# long TTL so browsers can cache) vs invoice PDFs (customer PII, short TTL;
-# the customer-facing download is additionally gated by the invoice's own
-# capability token and streams through the app, not the bucket URL).
+# - PUBLIC imagery (hero/layout/room photos) -> Cloudinary when CLOUDINARY_URL
+#   is set: permanent CDN URLs (browser caching works) + on-the-fly
+#   resize/format transformations. Falls back to B2's media bucket (presigned
+#   URLs) if only B2 is configured, else the local filesystem.
+# - PRIVATE files (invoice PDFs, customer PII) -> the B2 invoice bucket, short
+#   presigned TTL; the customer-facing download is additionally gated by the
+#   invoice's own capability token and streams through the app. Never
+#   Cloudinary: its free plan does not deliver PDFs, and these must not sit
+#   behind permanent public URLs anyway.
 #
 # Tests always use the filesystem: they create real files (invoice PDFs) and
-# must never depend on — or write into — a live bucket.
+# must never depend on — or write into — a live bucket/CDN.
 
 TESTING = "test" in sys.argv
+
+CLOUDINARY_URL = env("CLOUDINARY_URL", default="")
+USE_CLOUDINARY = not TESTING and bool(CLOUDINARY_URL)
+if USE_CLOUDINARY:
+    # The cloudinary SDK configures itself from the process environment, and
+    # django-environ reads .env into its own store — bridge the two.
+    os.environ["CLOUDINARY_URL"] = CLOUDINARY_URL
 
 B2_S3_ENDPOINT_URL = env("B2_S3_ENDPOINT_URL", default="")
 B2_ACCESS_KEY_ID = env("B2_ACCESS_KEY_ID", default="")
@@ -251,9 +265,16 @@ def _b2_storage(bucket_name, url_ttl_seconds):
 
 _FILESYSTEM = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
 
+if USE_CLOUDINARY:
+    _PUBLIC_MEDIA = {"BACKEND": "cloudinary_storage.storage.MediaCloudinaryStorage"}
+elif USE_B2:
+    _PUBLIC_MEDIA = _b2_storage(B2_MEDIA_BUCKET, 24 * 3600)
+else:
+    _PUBLIC_MEDIA = _FILESYSTEM
+
 # WhiteNoise: compress + hash static filenames for far-future caching.
 STORAGES = {
-    "default": _b2_storage(B2_MEDIA_BUCKET, 24 * 3600) if USE_B2 else _FILESYSTEM,
+    "default": _PUBLIC_MEDIA,
     # Invoice.pdf_file resolves this alias at runtime (see
     # apps.bookings.models.select_invoice_storage).
     "invoices": _b2_storage(B2_INVOICE_BUCKET, 600) if USE_B2 else _FILESYSTEM,

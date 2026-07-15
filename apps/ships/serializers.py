@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import FoodMenuItem, Room, RoomType, Ship
+from .models import FoodMenuItem, Room, RoomImage, RoomType, Ship
 
 
 class RoomTypeSerializer(serializers.ModelSerializer):
@@ -9,12 +9,21 @@ class RoomTypeSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "max_adults", "max_kids", "base_price"]
 
 
+class RoomImageSerializer(serializers.ModelSerializer):
+    image = serializers.ImageField(read_only=True, use_url=True)
+
+    class Meta:
+        model = RoomImage
+        fields = ["id", "image", "caption", "sort_order"]
+
+
 class RoomSerializer(serializers.ModelSerializer):
     room_type = RoomTypeSerializer(read_only=True)
+    images = RoomImageSerializer(many=True, read_only=True)
 
     class Meta:
         model = Room
-        fields = ["id", "room_number", "floor_number", "room_type"]
+        fields = ["id", "room_number", "floor_number", "room_type", "images"]
 
 
 class ShipSerializer(serializers.ModelSerializer):
@@ -36,8 +45,10 @@ class ShipLayoutSerializer(ShipSerializer):
         fields = ShipSerializer.Meta.fields + ["floors"]
 
     def get_floors(self, ship):
-        rooms = ship.rooms.select_related("room_type").order_by(
-            "floor_number", "room_number"
+        rooms = (
+            ship.rooms.select_related("room_type")
+            .prefetch_related("images")
+            .order_by("floor_number", "room_number")
         )
         floors = {}
         for room in rooms:

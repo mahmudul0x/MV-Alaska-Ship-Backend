@@ -47,6 +47,7 @@ class PackageViewSet(viewsets.ReadOnlyModelViewSet):
         package_rooms = (
             PackageRoom.objects.filter(package=package)
             .select_related("room__room_type")
+            .prefetch_related("room__images")
             .annotate(is_booked=Exists(active_booking))
             .order_by("room__floor_number", "room__room_number")
         )

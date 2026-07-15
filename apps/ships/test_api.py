@@ -30,7 +30,8 @@ class ShipLayoutApiTests(ThrottlelessTestMixin, APITestCase):
         response = self.client.get(f"/api/ships/{self.ship.id}/layout/")
         room = response.data["floors"][0]["rooms"][0]
         self.assertEqual(
-            set(room.keys()), {"id", "room_number", "floor_number", "room_type"}
+            set(room.keys()),
+            {"id", "room_number", "floor_number", "room_type", "images"},
         )
 
     def test_inactive_ship_hidden_from_list(self):

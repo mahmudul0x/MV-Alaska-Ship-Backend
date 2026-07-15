@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from apps.ships.serializers import RoomTypeSerializer
+from apps.ships.serializers import RoomImageSerializer, RoomTypeSerializer
 
 from .models import KidPricingRule, Package, PackageRoom
 
@@ -79,11 +79,19 @@ class PackageRoomSerializer(serializers.ModelSerializer):
     room_number = serializers.CharField(source="room.room_number", read_only=True)
     floor_number = serializers.IntegerField(source="room.floor_number", read_only=True)
     room_type = RoomTypeSerializer(source="room.room_type", read_only=True)
+    images = RoomImageSerializer(source="room.images", many=True, read_only=True)
     availability = serializers.SerializerMethodField()
 
     class Meta:
         model = PackageRoom
-        fields = ["id", "room_number", "floor_number", "room_type", "availability"]
+        fields = [
+            "id",
+            "room_number",
+            "floor_number",
+            "room_type",
+            "images",
+            "availability",
+        ]
 
     def get_availability(self, package_room):
         if not package_room.is_available:

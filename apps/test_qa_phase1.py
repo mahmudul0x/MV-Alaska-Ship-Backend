@@ -309,7 +309,9 @@ class QueryCountTests(QaPhase1TestCase):
                 ship=self.ship, room_type=self.type_2p, room_number=f"Q{i}"
             )
             PackageRoom.objects.create(package=self.package, room=room)
-        with self.assertNumQueries(2):
+        # package + annotated rooms + one gallery-image prefetch for ALL rooms
+        # — still constant however many rooms the package has.
+        with self.assertNumQueries(3):
             self.client.get(f"/api/packages/{self.package.id}/rooms/")
 
 

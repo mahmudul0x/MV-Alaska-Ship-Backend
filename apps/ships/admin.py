@@ -1,11 +1,29 @@
 from django.contrib import admin
+from django.utils.html import format_html
 
-from .models import FoodMenuItem, Room, RoomType, Ship
+from .models import FoodMenuItem, Room, RoomImage, RoomType, Ship
 
 
 class RoomInline(admin.TabularInline):
     model = Room
     extra = 0
+
+
+class RoomImageInline(admin.TabularInline):
+    model = RoomImage
+    extra = 1
+    fields = ("preview", "image", "caption", "sort_order")
+    readonly_fields = ("preview",)
+
+    @admin.display(description="Preview")
+    def preview(self, room_image):
+        if not room_image.image:
+            return "—"
+        return format_html(
+            '<img src="{}" style="max-height:80px;max-width:120px;'
+            'object-fit:cover;border-radius:4px;" alt="">',
+            room_image.image.url,
+        )
 
 
 @admin.register(Ship)
@@ -23,9 +41,14 @@ class RoomTypeAdmin(admin.ModelAdmin):
 
 @admin.register(Room)
 class RoomAdmin(admin.ModelAdmin):
-    list_display = ("room_number", "floor_number", "ship", "room_type")
+    list_display = ("room_number", "floor_number", "ship", "room_type", "image_count")
     list_filter = ("ship", "room_type", "floor_number")
     search_fields = ("room_number",)
+    inlines = [RoomImageInline]
+
+    @admin.display(description="Images")
+    def image_count(self, room):
+        return room.images.count()
 
 
 @admin.register(FoodMenuItem)
