@@ -3,8 +3,10 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
-from .models import RoomType, Ship
+from .models import Cabin, RoomType, Ship
 from .serializers import (
+    CabinDetailSerializer,
+    CabinListSerializer,
     FoodMenuSerializer,
     RoomTypeSerializer,
     ShipLayoutSerializer,
@@ -33,6 +35,29 @@ class ShipViewSet(viewsets.ReadOnlyModelViewSet):
         ship = self.get_object()
         serializer = FoodMenuSerializer(ship, context={"request": request})
         return Response(serializer.data)
+
+
+class CabinViewSet(viewsets.ReadOnlyModelViewSet):
+    """Public cabin showcase for the /cabins pages — staff-managed marketing
+    content (name, features, gallery). Looked up by slug so the frontend URL
+    (/cabins/premier-balcony-suite) maps straight onto the API. Price-free by
+    design: pricing/availability belong to the booking flow."""
+
+    # Small bounded catalog read as a bare array; read-only browsing bucket.
+    pagination_class = None
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "read"
+    lookup_field = "slug"
+    queryset = (
+        Cabin.objects.filter(is_active=True)
+        .select_related("room_type")
+        .prefetch_related("images")
+    )
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return CabinDetailSerializer
+        return CabinListSerializer
 
 
 class RoomTypeViewSet(viewsets.ReadOnlyModelViewSet):

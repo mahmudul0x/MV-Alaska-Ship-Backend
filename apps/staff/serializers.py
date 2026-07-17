@@ -16,7 +16,15 @@ from apps.bookings.exceptions import RoomUnavailable
 from apps.bookings.models import Booking, BookingStatusLog, Invoice, Payment
 from apps.bookings.serializers import BookingCreateSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
-from apps.ships.models import FoodMenuItem, Room, RoomImage, RoomType, Ship
+from apps.ships.models import (
+    Cabin,
+    CabinImage,
+    FoodMenuItem,
+    Room,
+    RoomImage,
+    RoomType,
+    Ship,
+)
 
 
 class StaffTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -111,6 +119,103 @@ class StaffRoomImageSerializer(serializers.ModelSerializer):
                 f"it below {max_mb} MB before uploading."
             )
         return image
+
+
+class StaffCabinImageSerializer(serializers.ModelSerializer):
+    """Cabin gallery photo, managed from the dashboard's Cabins page.
+
+    Same contract as StaffRoomImageSerializer: `image` is upload-only,
+    reads carry `image_url` (CDN URL in production), and `cabin` is immutable
+    after upload. Setting `is_main=true` atomically clears the previous main
+    (enforced in CabinImage.save) — the main image is what the public cabin
+    card shows.
+    """
+
+    image = serializers.ImageField(write_only=True)
+    image_url = serializers.ImageField(source="image", read_only=True, use_url=True)
+
+    class Meta:
+        model = CabinImage
+        fields = ["id", "cabin", "image", "image_url", "caption", "is_main", "sort_order"]
+
+    def update(self, instance, validated_data):
+        validated_data.pop("cabin", None)  # immutable — see docstring
+        return super().update(instance, validated_data)
+
+    def validate_image(self, image):
+        max_mb = 10
+        if image.size > max_mb * 1024 * 1024:
+            raise serializers.ValidationError(
+                f"Image is {image.size / (1024 * 1024):.1f} MB — please compress "
+                f"it below {max_mb} MB before uploading."
+            )
+        return image
+
+
+class StaffCabinSerializer(serializers.ModelSerializer):
+    """Showcase cabin content (public /cabins pages), fully staff-editable.
+
+    `features` is a list of strings; `amenities` a list of {label, value};
+    `highlights` a list of {title, desc}. Shapes are validated here so a
+    malformed payload can never break the public pages.
+    """
+
+    ship_name = serializers.CharField(source="ship.name", read_only=True)
+    room_type_name = serializers.CharField(source="room_type.name", read_only=True)
+    occupancy = serializers.CharField(source="occupancy_label", read_only=True)
+    images = StaffCabinImageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Cabin
+        fields = [
+            "id",
+            "ship",
+            "ship_name",
+            "room_type",
+            "room_type_name",
+            "occupancy",
+            "slug",
+            "name",
+            "tagline",
+            "description",
+            "size_label",
+            "features",
+            "amenities",
+            "highlights",
+            "is_active",
+            "sort_order",
+            "images",
+        ]
+        extra_kwargs = {"slug": {"required": False, "allow_blank": True}}
+
+    def validate_features(self, value):
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise serializers.ValidationError("Features must be a list of strings.")
+        return [item.strip() for item in value if item.strip()]
+
+    def _validate_dict_list(self, value, keys, label):
+        if not isinstance(value, list):
+            raise serializers.ValidationError(f"{label} must be a list.")
+        cleaned = []
+        for item in value:
+            if not isinstance(item, dict) or set(item.keys()) != set(keys) or not all(
+                isinstance(item[key], str) for key in keys
+            ):
+                raise serializers.ValidationError(
+                    f"Each {label.lower()} entry must be an object with "
+                    f"{' and '.join(keys)} strings."
+                )
+            if any(item[key].strip() for key in keys):
+                cleaned.append({key: item[key].strip() for key in keys})
+        return cleaned
+
+    def validate_amenities(self, value):
+        return self._validate_dict_list(value, ["label", "value"], "Amenities")
+
+    def validate_highlights(self, value):
+        return self._validate_dict_list(value, ["title", "desc"], "Highlights")
 
 
 class StaffFoodMenuItemSerializer(serializers.ModelSerializer):

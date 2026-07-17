@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import FoodMenuItem, Room, RoomImage, RoomType, Ship
+from .models import Cabin, CabinImage, FoodMenuItem, Room, RoomImage, RoomType, Ship
 
 
 class RoomTypeSerializer(serializers.ModelSerializer):
@@ -60,6 +60,53 @@ class ShipLayoutSerializer(ShipSerializer):
             for floor, floor_rooms in sorted(
                 floors.items(), key=lambda item: (item[0] is None, item[0] or 0)
             )
+        ]
+
+
+class CabinImageSerializer(serializers.ModelSerializer):
+    image = serializers.ImageField(read_only=True, use_url=True)
+
+    class Meta:
+        model = CabinImage
+        fields = ["id", "image", "caption", "is_main", "sort_order"]
+
+
+class CabinListSerializer(serializers.ModelSerializer):
+    """Card payload for the /cabins grid. Deliberately price-free — the cabins
+    pages are showcase content; pricing belongs to the booking flow."""
+
+    occupancy = serializers.CharField(source="occupancy_label", read_only=True)
+    main_image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Cabin
+        fields = [
+            "id",
+            "slug",
+            "name",
+            "tagline",
+            "size_label",
+            "occupancy",
+            "features",
+            "main_image",
+        ]
+
+    def get_main_image(self, cabin):
+        image = cabin.main_image
+        if not image:
+            return None
+        return CabinImageSerializer(image, context=self.context).data
+
+
+class CabinDetailSerializer(CabinListSerializer):
+    images = CabinImageSerializer(many=True, read_only=True)
+
+    class Meta(CabinListSerializer.Meta):
+        fields = CabinListSerializer.Meta.fields + [
+            "description",
+            "amenities",
+            "highlights",
+            "images",
         ]
 
 

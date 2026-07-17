@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import FoodMenuItem, Room, RoomImage, RoomType, Ship
+from .models import Cabin, CabinImage, FoodMenuItem, Room, RoomImage, RoomType, Ship
 
 
 class RoomInline(admin.TabularInline):
@@ -49,6 +49,32 @@ class RoomAdmin(admin.ModelAdmin):
     @admin.display(description="Images")
     def image_count(self, room):
         return room.images.count()
+
+
+class CabinImageInline(admin.TabularInline):
+    model = CabinImage
+    extra = 1
+    fields = ("preview", "image", "caption", "is_main", "sort_order")
+    readonly_fields = ("preview",)
+
+    @admin.display(description="Preview")
+    def preview(self, cabin_image):
+        if not cabin_image.image:
+            return "—"
+        return format_html(
+            '<img src="{}" style="max-height:80px;max-width:120px;'
+            'object-fit:cover;border-radius:4px;" alt="">',
+            cabin_image.image.url,
+        )
+
+
+@admin.register(Cabin)
+class CabinAdmin(admin.ModelAdmin):
+    list_display = ("name", "ship", "room_type", "is_active", "sort_order")
+    list_filter = ("ship", "is_active")
+    search_fields = ("name", "slug")
+    prepopulated_fields = {"slug": ("name",)}
+    inlines = [CabinImageInline]
 
 
 @admin.register(FoodMenuItem)

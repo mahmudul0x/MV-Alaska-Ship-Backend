@@ -1,4 +1,5 @@
-from django.db import models
+from django.db import models, transaction
+from django.utils.text import slugify
 
 
 class Ship(models.Model):
@@ -100,6 +101,136 @@ class RoomImage(models.Model):
 
     def __str__(self):
         return f"{self.room} — image {self.pk}"
+
+
+class Cabin(models.Model):
+    """A marketing cabin category shown on the public /cabins pages
+    (Premier Balcony Suite, Panorama View Cabin, …) — content is fully
+    staff-managed from the dashboard.
+
+    This is showcase content only: prices and availability are never part of
+    it (pricing lives on RoomType/packages and is deliberately not exposed on
+    the cabins pages). `room_type` is used purely to display occupancy limits
+    ("3 Adults + 1 Kids") from the single source of truth.
+    """
+
+    ship = models.ForeignKey(Ship, on_delete=models.CASCADE, related_name="cabins")
+    room_type = models.ForeignKey(
+        RoomType,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cabins",
+        help_text="Used to show occupancy (max adults/kids) on the cabin card.",
+    )
+    slug = models.SlugField(
+        max_length=80,
+        unique=True,
+        blank=True,
+        help_text="URL id, e.g. premier-balcony-suite. Auto-generated from the name when left blank.",
+    )
+    name = models.CharField(max_length=100)
+    tagline = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="One-line teaser under the name on the detail page.",
+    )
+    description = models.TextField(
+        blank=True, help_text="Long 'About this cabin' text on the detail page."
+    )
+    size_label = models.CharField(
+        max_length=30, blank=True, help_text='Shown on the card badge, e.g. "32 m²".'
+    )
+    #: List of feature strings; first 4 show on the card, all on the detail page.
+    features = models.JSONField(default=list, blank=True)
+    #: List of {"label": ..., "value": ...} rows for the detail page spec table.
+    amenities = models.JSONField(default=list, blank=True)
+    #: List of {"title": ..., "desc": ...} blocks for the detail page.
+    highlights = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(
+        default=True, help_text="Uncheck to hide from the website without deleting."
+    )
+    sort_order = models.PositiveSmallIntegerField(
+        default=0, help_text="Lower numbers show first."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    def __str__(self):
+        return f"{self.ship.name} — {self.name}"
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            base = slugify(self.name)[:70] or "cabin"
+            slug = base
+            counter = 2
+            while Cabin.objects.exclude(pk=self.pk).filter(slug=slug).exists():
+                slug = f"{base}-{counter}"
+                counter += 1
+            self.slug = slug
+        super().save(*args, **kwargs)
+
+    @property
+    def occupancy_label(self):
+        """Display string from the linked room type ("3 Adults + 1 Kids"),
+        empty when no room type is linked."""
+        if not self.room_type:
+            return ""
+        label = f"{self.room_type.max_adults} Adults"
+        if self.room_type.max_kids:
+            label += f" + {self.room_type.max_kids} Kids"
+        return label
+
+    @property
+    def main_image(self):
+        """The image staff picked for the card (is_main), falling back to the
+        first gallery image so a cabin never renders blank just because no
+        main was chosen yet."""
+        images = list(self.images.all())
+        return images[0] if images else None
+
+
+def cabin_image_path(cabin_image, filename):
+    """cabins/<ship_id>/<slug>/<original name> — keyed by ship so two ships'
+    identically named cabins never share a folder."""
+    cabin = cabin_image.cabin
+    return f"cabins/{cabin.ship_id}/{cabin.slug}/{filename}"
+
+
+class CabinImage(models.Model):
+    """A gallery photo of a showcase cabin. The one flagged `is_main` is the
+    card/hero image; the rest appear in the detail page gallery."""
+
+    cabin = models.ForeignKey(Cabin, on_delete=models.CASCADE, related_name="images")
+    image = models.ImageField(upload_to=cabin_image_path)
+    caption = models.CharField(max_length=150, blank=True)
+    is_main = models.BooleanField(
+        default=False, help_text="Shown on the cabin card. Only one per cabin."
+    )
+    sort_order = models.PositiveSmallIntegerField(
+        default=0, help_text="Lower numbers show first."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Main image first, so `cabin.images.all()[0]` is always the card image.
+        ordering = ["-is_main", "sort_order", "id"]
+
+    def __str__(self):
+        return f"{self.cabin} — image {self.pk}"
+
+    def save(self, *args, **kwargs):
+        with transaction.atomic():
+            if self.is_main:
+                # One main per cabin, enforced at the model layer so every
+                # writer (API, admin, shell) gets the same behavior.
+                CabinImage.objects.filter(cabin=self.cabin, is_main=True).exclude(
+                    pk=self.pk
+                ).update(is_main=False)
+            super().save(*args, **kwargs)
 
 
 class FoodMenuItem(models.Model):

@@ -3,6 +3,8 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     StaffBookingViewSet,
+    StaffCabinImageViewSet,
+    StaffCabinViewSet,
     StaffFoodMenuItemViewSet,
     StaffInvoiceViewSet,
     StaffKidPricingRuleViewSet,
@@ -26,6 +28,8 @@ router.register("payments", StaffPaymentViewSet, basename="staff-payment")
 router.register("room-types", StaffRoomTypeViewSet, basename="staff-room-type")
 router.register("rooms", StaffRoomViewSet, basename="staff-room")
 router.register("room-images", StaffRoomImageViewSet, basename="staff-room-image")
+router.register("cabins", StaffCabinViewSet, basename="staff-cabin")
+router.register("cabin-images", StaffCabinImageViewSet, basename="staff-cabin-image")
 router.register("kid-pricing-rules", StaffKidPricingRuleViewSet, basename="staff-kid-rule")
 router.register("food-menu-items", StaffFoodMenuItemViewSet, basename="staff-food-menu-item")
 router.register("invoices", StaffInvoiceViewSet, basename="staff-invoice")

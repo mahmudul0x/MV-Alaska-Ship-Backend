@@ -22,13 +22,23 @@ from apps.bookings.models import Booking, Invoice, Payment
 from apps.bookings.reports import generate_guide_report_pdf
 from apps.bookings.serializers import BookingPublicSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
-from apps.ships.models import FoodMenuItem, Room, RoomImage, RoomType, Ship
+from apps.ships.models import (
+    Cabin,
+    CabinImage,
+    FoodMenuItem,
+    Room,
+    RoomImage,
+    RoomType,
+    Ship,
+)
 
 from .serializers import (
     StaffBookingCreateSerializer,
     StaffBookingDetailSerializer,
     StaffBookingListSerializer,
     StaffBookingUpdateSerializer,
+    StaffCabinImageSerializer,
+    StaffCabinSerializer,
     StaffFoodMenuItemSerializer,
     StaffInvoiceSerializer,
     StaffKidPricingRuleSerializer,
@@ -440,6 +450,40 @@ class StaffRoomImageViewSet(viewsets.ModelViewSet):
         qs = RoomImage.objects.select_related("room").order_by("sort_order", "id")
         if self.request.query_params.get("room"):
             qs = qs.filter(room_id=self.request.query_params["room"])
+        return qs
+
+
+class StaffCabinViewSet(viewsets.ModelViewSet):
+    """Showcase cabins for the public /cabins pages — the dashboard's Cabins
+    page CRUDs these. Unpaginated: a ship carries a handful of cabin
+    categories, read whole by the dashboard."""
+
+    permission_classes = [IsAdminUser]
+    pagination_class = None
+    serializer_class = StaffCabinSerializer
+    queryset = (
+        Cabin.objects.select_related("ship", "room_type")
+        .prefetch_related("images")
+        .order_by("sort_order", "id")
+    )
+
+
+class StaffCabinImageViewSet(viewsets.ModelViewSet):
+    """Cabin gallery photos (dashboard Cabins page). Multipart upload like
+    room images; ?cabin=<id> narrows to one cabin's gallery. PATCHing
+    is_main=true makes a photo the public card image (previous main is
+    cleared atomically in the model)."""
+
+    permission_classes = [IsAdminUser]
+    pagination_class = None
+    serializer_class = StaffCabinImageSerializer
+
+    def get_queryset(self):
+        qs = CabinImage.objects.select_related("cabin").order_by(
+            "-is_main", "sort_order", "id"
+        )
+        if self.request.query_params.get("cabin"):
+            qs = qs.filter(cabin_id=self.request.query_params["cabin"])
         return qs
 
 
