@@ -3,11 +3,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
-from .models import Cabin, RoomType, Ship
+from .models import Cabin, GalleryImage, RoomType, Ship
 from .serializers import (
     CabinDetailSerializer,
     CabinListSerializer,
     FoodMenuSerializer,
+    GalleryImageSerializer,
     RoomTypeSerializer,
     ShipLayoutSerializer,
     ShipSerializer,
@@ -58,6 +59,20 @@ class CabinViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action == "retrieve":
             return CabinDetailSerializer
         return CabinListSerializer
+
+
+class GalleryImageViewSet(viewsets.ReadOnlyModelViewSet):
+    """Public /gallery page photos — staff-managed content (image + caption).
+    Active images only; hidden ones stay in the dashboard but never render
+    on the website."""
+
+    # Bounded set the page reads in one request as a bare array; read-only
+    # browsing bucket like the other public catalogs.
+    pagination_class = None
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "read"
+    serializer_class = GalleryImageSerializer
+    queryset = GalleryImage.objects.filter(is_active=True)
 
 
 class RoomTypeViewSet(viewsets.ReadOnlyModelViewSet):

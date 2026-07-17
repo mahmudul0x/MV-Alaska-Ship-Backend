@@ -16,13 +16,19 @@ from apps.bookings.views import (
     PaymentSuccessView,
 )
 from apps.packages.views import CalendarView, PackageViewSet
-from apps.ships.views import CabinViewSet, RoomTypeViewSet, ShipViewSet
+from apps.ships.views import (
+    CabinViewSet,
+    GalleryImageViewSet,
+    RoomTypeViewSet,
+    ShipViewSet,
+)
 
 router = DefaultRouter()
 router.register("packages", PackageViewSet, basename="package")
 router.register("ships", ShipViewSet, basename="ship")
 router.register("room-types", RoomTypeViewSet, basename="room-type")
 router.register("cabins", CabinViewSet, basename="cabin")
+router.register("gallery", GalleryImageViewSet, basename="gallery")
 router.register("bookings", BookingViewSet, basename="booking")
 
 

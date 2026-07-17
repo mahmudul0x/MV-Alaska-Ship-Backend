@@ -6,6 +6,7 @@ from .views import (
     StaffCabinImageViewSet,
     StaffCabinViewSet,
     StaffFoodMenuItemViewSet,
+    StaffGalleryImageViewSet,
     StaffInvoiceViewSet,
     StaffKidPricingRuleViewSet,
     StaffLoginView,
@@ -30,6 +31,7 @@ router.register("rooms", StaffRoomViewSet, basename="staff-room")
 router.register("room-images", StaffRoomImageViewSet, basename="staff-room-image")
 router.register("cabins", StaffCabinViewSet, basename="staff-cabin")
 router.register("cabin-images", StaffCabinImageViewSet, basename="staff-cabin-image")
+router.register("gallery-images", StaffGalleryImageViewSet, basename="staff-gallery-image")
 router.register("kid-pricing-rules", StaffKidPricingRuleViewSet, basename="staff-kid-rule")
 router.register("food-menu-items", StaffFoodMenuItemViewSet, basename="staff-food-menu-item")
 router.register("invoices", StaffInvoiceViewSet, basename="staff-invoice")

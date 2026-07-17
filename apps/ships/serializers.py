@@ -1,6 +1,15 @@
 from rest_framework import serializers
 
-from .models import Cabin, CabinImage, FoodMenuItem, Room, RoomImage, RoomType, Ship
+from .models import (
+    Cabin,
+    CabinImage,
+    FoodMenuItem,
+    GalleryImage,
+    Room,
+    RoomImage,
+    RoomType,
+    Ship,
+)
 
 
 class RoomTypeSerializer(serializers.ModelSerializer):
@@ -108,6 +117,14 @@ class CabinDetailSerializer(CabinListSerializer):
             "highlights",
             "images",
         ]
+
+
+class GalleryImageSerializer(serializers.ModelSerializer):
+    image = serializers.ImageField(read_only=True, use_url=True)
+
+    class Meta:
+        model = GalleryImage
+        fields = ["id", "image", "caption", "sort_order"]
 
 
 class FoodMenuSerializer(ShipSerializer):

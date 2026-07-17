@@ -26,6 +26,7 @@ from apps.ships.models import (
     Cabin,
     CabinImage,
     FoodMenuItem,
+    GalleryImage,
     Room,
     RoomImage,
     RoomType,
@@ -40,6 +41,7 @@ from .serializers import (
     StaffCabinImageSerializer,
     StaffCabinSerializer,
     StaffFoodMenuItemSerializer,
+    StaffGalleryImageSerializer,
     StaffInvoiceSerializer,
     StaffKidPricingRuleSerializer,
     StaffPackageRoomSerializer,
@@ -485,6 +487,20 @@ class StaffCabinImageViewSet(viewsets.ModelViewSet):
         if self.request.query_params.get("cabin"):
             qs = qs.filter(cabin_id=self.request.query_params["cabin"])
         return qs
+
+
+class StaffGalleryImageViewSet(viewsets.ModelViewSet):
+    """Public-gallery photos (dashboard Gallery page). Multipart upload like
+    room/cabin images; staff write a caption on each photo and can hide one
+    from the website (is_active=false) without deleting it. Unpaginated: the
+    gallery is a bounded set the page reads in one request."""
+
+    permission_classes = [IsAdminUser]
+    pagination_class = None
+    serializer_class = StaffGalleryImageSerializer
+    queryset = GalleryImage.objects.select_related("ship").order_by(
+        "sort_order", "id"
+    )
 
 
 class StaffKidPricingRuleViewSet(viewsets.ModelViewSet):

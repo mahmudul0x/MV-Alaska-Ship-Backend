@@ -20,6 +20,7 @@ from apps.ships.models import (
     Cabin,
     CabinImage,
     FoodMenuItem,
+    GalleryImage,
     Room,
     RoomImage,
     RoomType,
@@ -141,6 +142,46 @@ class StaffCabinImageSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         validated_data.pop("cabin", None)  # immutable — see docstring
         return super().update(instance, validated_data)
+
+    def validate_image(self, image):
+        max_mb = 10
+        if image.size > max_mb * 1024 * 1024:
+            raise serializers.ValidationError(
+                f"Image is {image.size / (1024 * 1024):.1f} MB — please compress "
+                f"it below {max_mb} MB before uploading."
+            )
+        return image
+
+
+class StaffGalleryImageSerializer(serializers.ModelSerializer):
+    """Public-gallery photo, managed from the dashboard's Gallery page.
+
+    Same contract as StaffRoomImageSerializer: `image` is upload-only
+    (multipart POST), reads carry `image_url` (CDN URL in production).
+    `caption` is the text staff write on each photo; `is_active` hides a
+    photo from the website without deleting it.
+    """
+
+    image = serializers.ImageField(write_only=True)
+    image_url = serializers.ImageField(source="image", read_only=True, use_url=True)
+    ship_name = serializers.CharField(source="ship.name", read_only=True)
+    # Explicit default: multipart uploads omit the field, and DRF reads a
+    # missing boolean in form data as False — without this, every freshly
+    # uploaded photo would land hidden.
+    is_active = serializers.BooleanField(default=True)
+
+    class Meta:
+        model = GalleryImage
+        fields = [
+            "id",
+            "ship",
+            "ship_name",
+            "image",
+            "image_url",
+            "caption",
+            "is_active",
+            "sort_order",
+        ]
 
     def validate_image(self, image):
         max_mb = 10

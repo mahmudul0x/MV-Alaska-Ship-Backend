@@ -233,6 +233,38 @@ class CabinImage(models.Model):
             super().save(*args, **kwargs)
 
 
+def gallery_image_path(gallery_image, filename):
+    """gallery/<ship_id>/<original name> — keyed by ship so each ship's
+    public gallery keeps its own folder."""
+    return f"gallery/{gallery_image.ship_id}/{filename}"
+
+
+class GalleryImage(models.Model):
+    """A photo on the public /gallery page — fully staff-managed from the
+    dashboard (upload, caption text, ordering, hide/show)."""
+
+    ship = models.ForeignKey(
+        Ship, on_delete=models.CASCADE, related_name="gallery_images"
+    )
+    image = models.ImageField(upload_to=gallery_image_path)
+    caption = models.CharField(
+        max_length=200, blank=True, help_text="Short text shown on the photo."
+    )
+    is_active = models.BooleanField(
+        default=True, help_text="Uncheck to hide from the website without deleting."
+    )
+    sort_order = models.PositiveSmallIntegerField(
+        default=0, help_text="Lower numbers show first."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    def __str__(self):
+        return f"{self.ship.name} — gallery image {self.pk}"
+
+
 class FoodMenuItem(models.Model):
     """A dish the chef may serve on a given day/meal. Rows are a selection
     pool, not a fixed daily assignment — the chef picks from the active
