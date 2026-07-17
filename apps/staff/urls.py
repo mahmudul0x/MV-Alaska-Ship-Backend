@@ -1,6 +1,8 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from apps.contact.views import StaffContactMessageViewSet
+
 from .views import (
     StaffBookingViewSet,
     StaffCabinImageViewSet,
@@ -35,6 +37,9 @@ router.register("gallery-images", StaffGalleryImageViewSet, basename="staff-gall
 router.register("kid-pricing-rules", StaffKidPricingRuleViewSet, basename="staff-kid-rule")
 router.register("food-menu-items", StaffFoodMenuItemViewSet, basename="staff-food-menu-item")
 router.register("invoices", StaffInvoiceViewSet, basename="staff-invoice")
+router.register(
+    "contact-messages", StaffContactMessageViewSet, basename="staff-contact-message"
+)
 
 urlpatterns = [
     path("login/", StaffLoginView.as_view(), name="staff-login"),

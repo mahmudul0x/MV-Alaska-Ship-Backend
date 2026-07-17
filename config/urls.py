@@ -15,6 +15,7 @@ from apps.bookings.views import (
     PaymentIPNView,
     PaymentSuccessView,
 )
+from apps.contact.views import ContactMessageCreateView
 from apps.packages.views import CalendarView, PackageViewSet
 from apps.ships.views import (
     CabinViewSet,
@@ -30,6 +31,7 @@ router.register("room-types", RoomTypeViewSet, basename="room-type")
 router.register("cabins", CabinViewSet, basename="cabin")
 router.register("gallery", GalleryImageViewSet, basename="gallery")
 router.register("bookings", BookingViewSet, basename="booking")
+router.register("contact-messages", ContactMessageCreateView, basename="contact-message")
 
 
 def _no_static_invoices(request, path=None):

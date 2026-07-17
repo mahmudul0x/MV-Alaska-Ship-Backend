@@ -58,7 +58,14 @@ class StaffShipSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Ship
-        fields = ["id", "name", "status", "authority_phones", "authority_phone_list"]
+        fields = [
+            "id",
+            "name",
+            "status",
+            "authority_phones",
+            "authority_phone_list",
+            "contact_notify_email",
+        ]
         read_only_fields = ["name", "status"]
 
     def validate_authority_phones(self, value):

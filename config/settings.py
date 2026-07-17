@@ -82,6 +82,7 @@ INSTALLED_APPS = [
     "apps.packages",
     "apps.bookings",
     "apps.staff",
+    "apps.contact",
 ]
 
 MIDDLEWARE = [
@@ -332,6 +333,10 @@ REST_FRAMEWORK = {
         # stuffing / password spraying against the admin dashboard. Keyed on
         # the real client IP (NUM_PROXIES set below), not a spoofable header.
         "login": "5/min",
+        # Public contact-form submissions: anonymous and land in the staff
+        # inbox, so keep the per-IP rate low enough that the form can't be used
+        # to flood it, while still comfortable for a genuine sender.
+        "contact": "5/min",
     },
     # Trusted proxy hop count for throttling. Without it DRF keys throttle
     # buckets on the raw client-supplied X-Forwarded-For header, which lets
@@ -384,6 +389,10 @@ BOOKING_HOLD_MINUTES = env.int("BOOKING_HOLD_MINUTES", default=30)
 AUTHORITY_PHONES = env(
     "AUTHORITY_PHONES", default="01712-823482,01831-694307,01342-919795"
 )
+
+# Where public /contact form submissions are emailed. This is the system-wide
+# default; a ship may override it from the staff dashboard (Ship.contact_notify_email).
+CONTACT_NOTIFY_EMAIL = env("CONTACT_NOTIFY_EMAIL", default="mahmudulabin@gmail.com")
 
 # The gateway session lifetime: once a PENDING payment is older than this
 # AND SSLCommerz's Transaction Query API reports no payment attempt on it,

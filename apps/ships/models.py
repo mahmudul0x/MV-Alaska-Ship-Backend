@@ -21,6 +21,13 @@ class Ship(models.Model):
         blank=True,
         help_text="Helpline numbers for the report/invoice header, comma-separated.",
     )
+    #: Where this ship's public /contact form submissions are emailed. Editable
+    #: from the staff dashboard; when blank, falls back to
+    #: settings.CONTACT_NOTIFY_EMAIL.
+    contact_notify_email = models.EmailField(
+        blank=True,
+        help_text="Inbox for website contact-form messages. Blank uses the system default.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -42,6 +49,17 @@ class Ship(models.Model):
             settings, "AUTHORITY_PHONES", ""
         )
         return [n.strip() for n in raw.split(",") if n.strip()]
+
+    @property
+    def contact_notify_recipient(self):
+        """The email address website contact-form messages for this ship go to,
+        falling back to the system default (settings.CONTACT_NOTIFY_EMAIL) when
+        the ship has no override set."""
+        from django.conf import settings
+
+        return self.contact_notify_email or getattr(
+            settings, "CONTACT_NOTIFY_EMAIL", ""
+        )
 
 
 class RoomType(models.Model):
