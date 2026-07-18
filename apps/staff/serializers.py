@@ -71,6 +71,7 @@ class StaffShipSerializer(serializers.ModelSerializer):
             "authority_phones",
             "authority_phone_list",
             "contact_notify_email",
+            "guide_report_density",
         ]
         read_only_fields = ["name", "status"]
 

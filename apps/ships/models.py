@@ -28,6 +28,22 @@ class Ship(models.Model):
         blank=True,
         help_text="Inbox for website contact-form messages. Blank uses the system default.",
     )
+
+    class GuideReportDensity(models.TextChoices):
+        COMPACT = "compact", "Compact"  # smaller type, more rooms per page
+        NORMAL = "normal", "Normal"
+        LARGE = "large", "Large"  # bigger type, easier to read, may span pages
+
+    #: How dense the guide collection report PDF is. Per-ship so a busy sailing
+    #: can pack more rooms on one page (compact) while another prints large,
+    #: easy-to-read type; the guide reads it on the ship, so legibility vs.
+    #: page-count is the ship operator's call.
+    guide_report_density = models.CharField(
+        max_length=10,
+        choices=GuideReportDensity.choices,
+        default=GuideReportDensity.NORMAL,
+        help_text="Guide report PDF text size / rows-per-page.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

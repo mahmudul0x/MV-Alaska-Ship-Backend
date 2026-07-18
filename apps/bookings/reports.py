@@ -26,6 +26,19 @@ RULE = (210, 216, 222)
 GROUP_BAR = (198, 160, 74)  # gold
 GROUP_TINT = (250, 246, 236)  # faint gold wash behind a group's rows
 
+# Per-ship density profiles for the guide report table. Compact packs more
+# rooms on a page; large prints bigger, easier-to-read type (and may run to a
+# second page). Only the table body/header scale — the branding header is fixed.
+#   row_h   : height of one table row, mm
+#   body    : body-text point size
+#   head    : column-header point size
+#   small   : point size for the group subtotal / secondary labels
+DENSITY_PROFILES = {
+    "compact": {"row_h": 5.5, "body": 7.5, "head": 7.5, "small": 7.0},
+    "normal": {"row_h": 7.0, "body": 9.0, "head": 8.5, "small": 8.5},
+    "large": {"row_h": 8.5, "body": 11.0, "head": 10.0, "small": 9.5},
+}
+
 
 def _grouped_booking_rows(package):
     """Active BookingRooms for the package, grouped by booking so a family's
@@ -88,6 +101,12 @@ def generate_guide_report_pdf(package, scope="booked"):
     groups = _grouped_booking_rows(package)
     booked_room_ids = {br.room_id for g in groups for br in g["rooms"]}
     unbooked = _unbooked_rooms(package, booked_room_ids) if scope == "all" else []
+
+    # Per-ship table density (compact/normal/large) — scales the table's row
+    # height and font sizes; unknown/blank falls back to normal.
+    prof = DENSITY_PROFILES.get(package.ship.guide_report_density, DENSITY_PROFILES["normal"])
+    row_h = prof["row_h"]
+    body_pt, head_pt, small_pt = prof["body"], prof["head"], prof["small"]
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -161,25 +180,24 @@ def generate_guide_report_pdf(package, scope="booked"):
         "room": 16, "name": epw - 16 - 30 - 15 - 15 - 30 - 30,
         "phone": 30, "adults": 15, "kids": 15, "paid": 30, "due": 30,
     }
-    pdf.set_font("NotoSans", "B", 8.5)
+    pdf.set_font("NotoSans", "B", head_pt)
     pdf.set_fill_color(*NAVY)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(col["room"], 7, " Room", fill=True)
-    pdf.cell(col["name"], 7, " Customer name", fill=True)
-    pdf.cell(col["phone"], 7, " Mobile", fill=True)
-    pdf.cell(col["adults"], 7, "Adults", fill=True, align="C")
-    pdf.cell(col["kids"], 7, "Kids", fill=True, align="C")
-    pdf.cell(col["paid"], 7, "Paid (BDT) ", fill=True, align="R")
-    pdf.cell(col["due"], 7, "Due (BDT) ", fill=True, align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(col["room"], row_h, " Room", fill=True)
+    pdf.cell(col["name"], row_h, " Customer name", fill=True)
+    pdf.cell(col["phone"], row_h, " Mobile", fill=True)
+    pdf.cell(col["adults"], row_h, "Adults", fill=True, align="C")
+    pdf.cell(col["kids"], row_h, "Kids", fill=True, align="C")
+    pdf.cell(col["paid"], row_h, "Paid (BDT) ", fill=True, align="R")
+    pdf.cell(col["due"], row_h, "Due (BDT) ", fill=True, align="R", new_x="LMARGIN", new_y="NEXT")
 
     # Rows
     total_paid = total_due = Decimal("0.00")
     total_adults = total_kids = 0
-    row_h = 7
     # x where the group accent bar is drawn (just inside the left margin).
     bar_x = pdf.l_margin
     zebra_i = 0  # zebra alternates per printed row, across groups
-    pdf.set_font("NotoSans", "", 9)
+    pdf.set_font("NotoSans", "", body_pt)
     pdf.set_text_color(40, 40, 40)
 
     def money_row(label_cells, paid, due, *, bold_due, fill_rgb, top_border=False):
@@ -190,10 +208,10 @@ def generate_guide_report_pdf(package, scope="booked"):
         for width, text, align in label_cells:
             pdf.cell(width, row_h, text, fill=True, align=align, border=border)
         pdf.cell(col["paid"], row_h, paid, fill=True, align="R", border=border)
-        pdf.set_font("NotoSans", "B" if bold_due else "", 9)
+        pdf.set_font("NotoSans", "B" if bold_due else "", body_pt)
         pdf.cell(col["due"], row_h, due, fill=True, align="R", border=border,
                  new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("NotoSans", "", 9)
+        pdf.set_font("NotoSans", "", body_pt)
 
     for group in groups:
         booking = group["booking"]
@@ -259,20 +277,21 @@ def generate_guide_report_pdf(package, scope="booked"):
         total_due += booking.due_amount
 
     if not groups:
-        pdf.set_font("NotoSans", "", 9)
+        pdf.set_font("NotoSans", "", body_pt)
         pdf.cell(epw, 10, "No active bookings for this package.", align="C",
                  new_x="LMARGIN", new_y="NEXT")
 
     # Totals row (booked rooms only — the money the guide collects)
+    total_h = row_h + 1
     pdf.set_draw_color(*RULE)
-    pdf.set_font("NotoSans", "B", 9)
+    pdf.set_font("NotoSans", "B", body_pt)
     pdf.set_text_color(40, 40, 40)
-    pdf.cell(col["room"] + col["name"] + col["phone"], 8, " TOTAL", border="T")
-    pdf.cell(col["adults"], 8, str(total_adults), border="T", align="C")
-    pdf.cell(col["kids"], 8, str(total_kids), border="T", align="C")
-    pdf.cell(col["paid"], 8, f"{total_paid} ", border="T", align="R")
+    pdf.cell(col["room"] + col["name"] + col["phone"], total_h, " TOTAL", border="T")
+    pdf.cell(col["adults"], total_h, str(total_adults), border="T", align="C")
+    pdf.cell(col["kids"], total_h, str(total_kids), border="T", align="C")
+    pdf.cell(col["paid"], total_h, f"{total_paid} ", border="T", align="R")
     pdf.set_text_color(*NAVY)
-    pdf.cell(col["due"], 8, f"{total_due} ", border="T", align="R",
+    pdf.cell(col["due"], total_h, f"{total_due} ", border="T", align="R",
              new_x="LMARGIN", new_y="NEXT")
 
     # ── Available (unbooked) rooms — only in the all-rooms report ──────────
@@ -281,10 +300,10 @@ def generate_guide_report_pdf(package, scope="booked"):
     # amounts in by hand as walk-up cabins are taken on board.
     if scope == "all":
         pdf.ln(4)
-        pdf.set_font("NotoSans", "B", 9)
+        pdf.set_font("NotoSans", "B", body_pt)
         pdf.set_text_color(*NAVY)
         pdf.cell(
-            epw, 6,
+            epw, row_h,
             f"Available (unbooked) — {len(unbooked)} "
             f"room{'s' if len(unbooked) != 1 else ''}  ·  fill in on board",
             new_x="LMARGIN", new_y="NEXT",
@@ -293,23 +312,23 @@ def generate_guide_report_pdf(package, scope="booked"):
             pdf.set_draw_color(*RULE)
             for i, pr in enumerate(unbooked):
                 room = pr.room
-                pdf.set_font("NotoSans", "", 9)
+                pdf.set_font("NotoSans", "", body_pt)
                 pdf.set_text_color(40, 40, 40)
                 pdf.set_fill_color(*(ZEBRA if i % 2 == 0 else (255, 255, 255)))
                 # Room number only; every other cell left blank (bordered) so
                 # the guide can hand-write into it.
-                pdf.cell(col["room"], 7, f" {room.room_number}", fill=True, border="B")
-                pdf.cell(col["name"], 7, "", fill=True, border="B")
-                pdf.cell(col["phone"], 7, "", fill=True, border="B")
-                pdf.cell(col["adults"], 7, "", fill=True, border="B", align="C")
-                pdf.cell(col["kids"], 7, "", fill=True, border="B", align="C")
-                pdf.cell(col["paid"], 7, "", fill=True, border="B", align="R")
-                pdf.cell(col["due"], 7, "", fill=True, border="B", align="R",
+                pdf.cell(col["room"], row_h, f" {room.room_number}", fill=True, border="B")
+                pdf.cell(col["name"], row_h, "", fill=True, border="B")
+                pdf.cell(col["phone"], row_h, "", fill=True, border="B")
+                pdf.cell(col["adults"], row_h, "", fill=True, border="B", align="C")
+                pdf.cell(col["kids"], row_h, "", fill=True, border="B", align="C")
+                pdf.cell(col["paid"], row_h, "", fill=True, border="B", align="R")
+                pdf.cell(col["due"], row_h, "", fill=True, border="B", align="R",
                          new_x="LMARGIN", new_y="NEXT")
         else:
-            pdf.set_font("NotoSans", "", 8.5)
+            pdf.set_font("NotoSans", "", small_pt)
             pdf.set_text_color(*GREY)
-            pdf.cell(epw, 7, "  Every room on this sailing is booked.",
+            pdf.cell(epw, row_h, "  Every room on this sailing is booked.",
                      new_x="LMARGIN", new_y="NEXT")
 
     # Authorized signature (right side, below the totals)
