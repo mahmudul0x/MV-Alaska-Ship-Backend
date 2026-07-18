@@ -31,6 +31,17 @@ class PackageAdmin(admin.ModelAdmin):
             {"fields": ("status", "is_booking_open", "booking_cutoff_datetime")},
         ),
         (
+            "Displayed duration",
+            {
+                "fields": ("duration_days", "duration_nights"),
+                "description": (
+                    "Leave both blank to auto-calculate from the dates "
+                    "(nights = end − start, days = nights + 1). Set to override "
+                    "the '3 Days · 2 Nights' text on the public package card."
+                ),
+            },
+        ),
+        (
             "Marketing (public website)",
             {
                 "fields": (

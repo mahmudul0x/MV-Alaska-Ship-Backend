@@ -73,14 +73,22 @@ def _room_num_key(room_number):
 
 
 def _unbooked_rooms(package, booked_room_ids):
-    """Package rooms with NO active booking, ordered by room number — the
-    'still available' tail of the all-rooms report."""
+    """Package rooms with NO active booking, split into (available, blocked),
+    each ordered by room number.
+
+    Blocked rooms (admin holds) are called out separately so the sheet shows
+    which cabins are deliberately withheld — a held cabin is not "available to
+    walk-up", and printing it in the available list would mislead the guide."""
     rooms = (
         PackageRoom.objects.filter(package=package)
         .exclude(room_id__in=booked_room_ids)
-        .select_related("room__room_type")
+        .select_related("room__room_type", "blocked_by")
     )
-    return sorted(rooms, key=lambda pr: _room_num_key(pr.room.room_number))
+    available, blocked = [], []
+    for pr in rooms:
+        (blocked if pr.is_blocked else available).append(pr)
+    key = lambda pr: _room_num_key(pr.room.room_number)
+    return sorted(available, key=key), sorted(blocked, key=key)
 
 
 def generate_guide_report_pdf(package, scope="booked"):
@@ -100,7 +108,12 @@ def generate_guide_report_pdf(package, scope="booked"):
     # is unchanged. Totals sum per booking, never per room.
     groups = _grouped_booking_rows(package)
     booked_room_ids = {br.room_id for g in groups for br in g["rooms"]}
-    unbooked = _unbooked_rooms(package, booked_room_ids) if scope == "all" else []
+    # Blocked (admin-held) rooms are always listed — even on the default
+    # "booked" dues sheet — so staff/guide see which cabins are deliberately
+    # held. The available (walk-up) list stays all-scope only.
+    available_rooms, blocked_rooms = _unbooked_rooms(package, booked_room_ids)
+    if scope != "all":
+        available_rooms = []
 
     # Per-ship table density (compact/normal/large) — scales the table's row
     # height and font sizes; unknown/blank falls back to normal.
@@ -294,6 +307,34 @@ def generate_guide_report_pdf(package, scope="booked"):
     pdf.cell(col["due"], total_h, f"{total_due} ", border="T", align="R",
              new_x="LMARGIN", new_y="NEXT")
 
+    # ── Blocked (admin-held) rooms — shown in BOTH scopes ──────────────────
+    # Cabins staff deliberately withheld from sale. Listed with their internal
+    # reason so the guide/office knows the cabin is held on purpose (not a data
+    # gap) and is not to be sold on board.
+    if blocked_rooms:
+        pdf.ln(4)
+        pdf.set_font("NotoSans", "B", body_pt)
+        pdf.set_text_color(*NAVY)
+        pdf.cell(
+            epw, row_h,
+            f"Blocked by admin — {len(blocked_rooms)} "
+            f"room{'s' if len(blocked_rooms) != 1 else ''}  ·  held, not for sale",
+            new_x="LMARGIN", new_y="NEXT",
+        )
+        pdf.set_draw_color(*RULE)
+        # Room + a wide "held / reason" span across the remaining columns.
+        reason_w = col["name"] + col["phone"] + col["adults"] + col["kids"] + \
+            col["paid"] + col["due"]
+        for i, pr in enumerate(blocked_rooms):
+            room = pr.room
+            reason = pr.block_reason or "Held by admin"
+            pdf.set_font("NotoSans", "", body_pt)
+            pdf.set_text_color(40, 40, 40)
+            pdf.set_fill_color(*(ZEBRA if i % 2 == 0 else (255, 255, 255)))
+            pdf.cell(col["room"], row_h, f" {room.room_number}", fill=True, border="B")
+            pdf.cell(reason_w, row_h, f" Blocked by admin — {reason}", fill=True,
+                     border="B", new_x="LMARGIN", new_y="NEXT")
+
     # ── Available (unbooked) rooms — only in the all-rooms report ──────────
     # Same table columns as the booked rows above, but only the room number is
     # filled — the guide prints the sheet and writes the customer, pax and
@@ -304,13 +345,13 @@ def generate_guide_report_pdf(package, scope="booked"):
         pdf.set_text_color(*NAVY)
         pdf.cell(
             epw, row_h,
-            f"Available (unbooked) — {len(unbooked)} "
-            f"room{'s' if len(unbooked) != 1 else ''}  ·  fill in on board",
+            f"Available (unbooked) — {len(available_rooms)} "
+            f"room{'s' if len(available_rooms) != 1 else ''}  ·  fill in on board",
             new_x="LMARGIN", new_y="NEXT",
         )
-        if unbooked:
+        if available_rooms:
             pdf.set_draw_color(*RULE)
-            for i, pr in enumerate(unbooked):
+            for i, pr in enumerate(available_rooms):
                 room = pr.room
                 pdf.set_font("NotoSans", "", body_pt)
                 pdf.set_text_color(40, 40, 40)
@@ -328,8 +369,12 @@ def generate_guide_report_pdf(package, scope="booked"):
         else:
             pdf.set_font("NotoSans", "", small_pt)
             pdf.set_text_color(*GREY)
-            pdf.cell(epw, row_h, "  Every room on this sailing is booked.",
-                     new_x="LMARGIN", new_y="NEXT")
+            msg = (
+                "  Every room on this sailing is booked or blocked."
+                if blocked_rooms
+                else "  Every room on this sailing is booked."
+            )
+            pdf.cell(epw, row_h, msg, new_x="LMARGIN", new_y="NEXT")
 
     # Authorized signature (right side, below the totals)
     pdf.ln(8)

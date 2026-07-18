@@ -25,6 +25,7 @@ class PackageListSerializer(serializers.ModelSerializer):
 
     ship = ShipMiniSerializer(read_only=True)
     nights = serializers.SerializerMethodField()
+    days = serializers.SerializerMethodField()
     is_bookable = serializers.SerializerMethodField()
     booking_status = serializers.SerializerMethodField()
 
@@ -38,6 +39,7 @@ class PackageListSerializer(serializers.ModelSerializer):
             "start_date",
             "end_date",
             "nights",
+            "days",
             "adult_price",
             "booking_cutoff_datetime",
             "is_bookable",
@@ -49,7 +51,10 @@ class PackageListSerializer(serializers.ModelSerializer):
         ]
 
     def get_nights(self, package):
-        return (package.end_date - package.start_date).days
+        return package.effective_nights()
+
+    def get_days(self, package):
+        return package.effective_days()
 
     def get_is_bookable(self, package):
         return package.is_bookable()
@@ -94,8 +99,13 @@ class PackageRoomSerializer(serializers.ModelSerializer):
         ]
 
     def get_availability(self, package_room):
+        # An admin hold is surfaced to the public as "booked" — the room is
+        # simply not on sale, and "booked" reads more naturally to a customer
+        # than "unavailable" (the internal block state/reason still never leaks;
+        # only the label is shared). A room genuinely dropped from inventory
+        # (is_available=False) stays "unavailable".
+        if package_room.is_booked or package_room.is_blocked:
+            return "booked"
         if not package_room.is_available:
             return "unavailable"
-        if package_room.is_booked:
-            return "booked"
         return "available"

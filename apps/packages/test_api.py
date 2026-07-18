@@ -16,6 +16,7 @@ PACKAGE_LIST_FIELDS = {
     "start_date",
     "end_date",
     "nights",
+    "days",
     "adult_price",
     "booking_cutoff_datetime",
     "is_bookable",
@@ -93,6 +94,9 @@ class PackageListApiTests(PackageApiTestCase):
         self.assertEqual(set(listed.keys()), PACKAGE_LIST_FIELDS)
         self.assertEqual(set(listed["ship"].keys()), {"id", "name"})
         self.assertEqual(listed["nights"], 2)
+        # days is nights + 1 (a 2-night sailing spans 3 calendar days) — the
+        # off-by-one the public card was rendering as "2 Days · 1 Nights".
+        self.assertEqual(listed["days"], 3)
         self.assertTrue(listed["is_bookable"])
         self.assertEqual(listed["booking_status"], "open")
 

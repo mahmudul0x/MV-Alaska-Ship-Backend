@@ -21,7 +21,7 @@ from apps.bookings import invoices, payment_service
 from apps.bookings.models import Booking, BookingRoom, Invoice, Payment
 from apps.bookings.reports import generate_guide_report_pdf
 from apps.bookings.serializers import BookingPublicSerializer
-from apps.packages.models import KidPricingRule, Package, PackageRoom
+from apps.packages.models import KidPricingRule, Package, PackageRoom, RoomBlocked
 from apps.ships.models import (
     Cabin,
     CabinImage,
@@ -48,6 +48,7 @@ from .serializers import (
     StaffPackageSerializer,
     StaffPaymentResolveSerializer,
     StaffPaymentSerializer,
+    StaffRoomBlockSerializer,
     StaffRoomImageSerializer,
     StaffRoomSerializer,
     StaffRoomTypeSerializer,
@@ -200,6 +201,55 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
             package_rooms, many=True, context={"bookings_by_room": bookings_by_room}
         )
         return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], url_path="block-room")
+    def block_room(self, request, pk=None):
+        """Admin hold: withhold one attached room from sale on this sailing.
+
+        A held room is surfaced to customers as "booked" (simply not on sale;
+        the reason never leaves the dashboard) and can be released again at any
+        time while the package is live. Booked rooms are rejected — cancel the
+        booking first."""
+        package = self.get_object()
+        serializer = StaffRoomBlockSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        package_room = self._package_room_or_404(
+            package, serializer.validated_data["room_id"]
+        )
+        try:
+            package_room.block(
+                user=request.user,
+                reason=serializer.validated_data.get("reason", ""),
+            )
+        except RoomBlocked as exc:
+            raise ValidationError({"room_id": exc.messages})
+        return Response(
+            StaffPackageRoomSerializer(package_room).data
+        )
+
+    @action(detail=True, methods=["post"], url_path="unblock-room")
+    def unblock_room(self, request, pk=None):
+        """Release an admin hold on one attached room, returning it to sale."""
+        package = self.get_object()
+        serializer = StaffRoomBlockSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        package_room = self._package_room_or_404(
+            package, serializer.validated_data["room_id"]
+        )
+        package_room.unblock()
+        return Response(
+            StaffPackageRoomSerializer(package_room).data
+        )
+
+    def _package_room_or_404(self, package, room_id):
+        package_room = (
+            PackageRoom.objects.filter(package=package, room_id=room_id)
+            .select_related("room__room_type", "package", "blocked_by")
+            .first()
+        )
+        if package_room is None:
+            raise Http404("That room is not attached to this package.")
+        return package_room
 
     @action(detail=True, methods=["get"], url_path="guide-report")
     def guide_report(self, request, pk=None):

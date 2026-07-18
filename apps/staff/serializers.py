@@ -332,7 +332,11 @@ class StaffPackageRoomBookingSerializer(serializers.ModelSerializer):
 class StaffPackageRoomSerializer(serializers.ModelSerializer):
     """One room within a package with its live status and (if booked) the
     active booking. Expects `bookings_by_room` {room_id: BookingRoom} in
-    context."""
+    context.
+
+    availability precedence: booked > blocked > unavailable > available.
+    'booked' wins over 'blocked' so a cabin that is both flagged blocked and
+    somehow still holds a live booking never hides the customer from staff."""
 
     room_id = serializers.IntegerField(source="room.id", read_only=True)
     room_number = serializers.CharField(source="room.room_number", read_only=True)
@@ -340,22 +344,28 @@ class StaffPackageRoomSerializer(serializers.ModelSerializer):
     room_type = StaffRoomTypeSerializer(source="room.room_type", read_only=True)
     availability = serializers.SerializerMethodField()
     booking = serializers.SerializerMethodField()
+    blocked_by_username = serializers.CharField(
+        source="blocked_by.username", read_only=True, default=None
+    )
 
     class Meta:
         model = PackageRoom
         fields = [
             "id", "room_id", "room_number", "floor_number", "room_type",
             "is_available", "availability", "booking",
+            "is_blocked", "block_reason", "blocked_by_username", "blocked_at",
         ]
 
     def _active_booking(self, package_room):
         return self.context.get("bookings_by_room", {}).get(package_room.room_id)
 
     def get_availability(self, package_room):
-        if not package_room.is_available:
-            return "unavailable"
         if self._active_booking(package_room):
             return "booked"
+        if package_room.is_blocked:
+            return "blocked"
+        if not package_room.is_available:
+            return "unavailable"
         return "available"
 
     def get_booking(self, package_room):
@@ -363,6 +373,18 @@ class StaffPackageRoomSerializer(serializers.ModelSerializer):
         if booking is None:
             return None
         return StaffPackageRoomBookingSerializer(booking).data
+
+
+class StaffRoomBlockSerializer(serializers.Serializer):
+    """Input for the per-package block-room action: which room, and an optional
+    internal reason. room_id must be a room attached to the package (validated
+    in the view against the PackageRoom set)."""
+
+    room_id = serializers.IntegerField()
+    reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=200,
+        help_text="Internal note (never shown to customers).",
+    )
 
 
 class StaffKidPricingRuleSerializer(serializers.ModelSerializer):
@@ -393,6 +415,11 @@ class StaffPackageSerializer(serializers.ModelSerializer):
     due_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     rooms_total = serializers.IntegerField(read_only=True)
     is_bookable = serializers.SerializerMethodField()
+    # Resolved duration for the dashboard to display — reflects the override if
+    # set, otherwise the auto-calculated value. The writable duration_days /
+    # duration_nights below are the override knobs (blank = auto).
+    effective_days = serializers.SerializerMethodField()
+    effective_nights = serializers.SerializerMethodField()
 
     class Meta:
         model = Package
@@ -400,12 +427,19 @@ class StaffPackageSerializer(serializers.ModelSerializer):
             "id", "ship", "ship_name", "start_date", "end_date",
             "booking_cutoff_datetime", "adult_price", "status", "is_booking_open",
             "min_deposit_percent", "balance_due_days_before_start",
+            "duration_days", "duration_nights", "effective_days", "effective_nights",
             "marketing_title", "marketing_description", "hero_image", "highlights",
             "bookings_count", "paid_total", "due_total", "rooms_total", "is_bookable",
         ]
 
     def get_is_bookable(self, package):
         return package.is_bookable()
+
+    def get_effective_days(self, package):
+        return package.effective_days()
+
+    def get_effective_nights(self, package):
+        return package.effective_nights()
 
     def validate(self, attrs):
         # DRF never calls model clean(), so without this an inverted date
@@ -426,6 +460,8 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         if self.instance:
             package.pk = self.instance.pk
         package.min_deposit_percent = value("min_deposit_percent")
+        package.duration_days = value("duration_days")
+        package.duration_nights = value("duration_nights")
         package.clean()
 
         # Changing the price of a sailing that already has bookings on it means
