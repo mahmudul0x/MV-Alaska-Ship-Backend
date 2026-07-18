@@ -19,21 +19,47 @@ NAVY = (16, 46, 80)
 ZEBRA = (247, 249, 251)
 GREY = (105, 115, 125)
 RULE = (210, 216, 222)
+# Group accent — the vertical bar + badge that marks a multi-room (family)
+# booking, so the guide sees at a glance which cabins are one party / one bill.
+GROUP_BAR = (198, 160, 74)  # gold
+GROUP_TINT = (250, 246, 236)  # faint gold wash behind a group's rows
 
 
-def generate_guide_report_pdf(package):
-    # One row per cabin (a family holding several cabins appears once per room),
-    # ordered by room number so the guide walks the ship in sequence. paid/due
-    # belong to the whole booking, so they are printed once — on the booking's
-    # first room here — and left blank on its other rooms, and the totals sum
-    # per booking, never per room (otherwise a 3-cabin family's balance would be
-    # counted three times).
+def _grouped_booking_rows(package):
+    """Active BookingRooms for the package, grouped by booking so a family's
+    cabins stay together, then ordered by their lowest room number so the guide
+    still walks the ship roughly in sequence.
+
+    Returns a list of groups, each: {"booking", "rooms": [BookingRoom, ...]}.
+    Single-room bookings are just a group of one — rendered exactly as before.
+    """
     booking_rooms = (
         BookingRoom.objects.filter(package=package)
         .exclude(booking__status=Booking.Status.CANCELLED)
         .select_related("booking", "room")
         .order_by("room__room_number")
     )
+    groups = {}
+    for br in booking_rooms:
+        groups.setdefault(br.booking_id, {"booking": br.booking, "rooms": []})
+        groups[br.booking_id]["rooms"].append(br)
+    # Order groups by each booking's lowest room number (numeric-aware), so a
+    # 2-cabin family sits at its first cabin's position in the walk-through.
+    def sort_key(group):
+        first = group["rooms"][0].room.room_number
+        return (len(first), first)  # short-then-lexical ≈ numeric for room nos.
+
+    return sorted(groups.values(), key=sort_key)
+
+
+def generate_guide_report_pdf(package):
+    # One row per cabin, but a family's cabins are kept TOGETHER and banded so
+    # the guide reads them as one party with one bill — not scattered across the
+    # sheet by room number with a blank balance on the second cabin (which read
+    # as "nothing owed"). paid/due belong to the whole booking, so a multi-room
+    # booking prints them once, on a per-group subtotal line; a single-room
+    # booking is unchanged. Totals sum per booking, never per room.
+    groups = _grouped_booking_rows(package)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -106,38 +132,96 @@ def generate_guide_report_pdf(package):
     # Rows
     total_paid = total_due = Decimal("0.00")
     total_adults = total_kids = 0
-    seen_bookings = set()  # a booking's paid/due is counted once, on its 1st room
+    row_h = 7
+    # x where the group accent bar is drawn (just inside the left margin).
+    bar_x = pdf.l_margin
+    zebra_i = 0  # zebra alternates per printed row, across groups
     pdf.set_font("NotoSans", "", 9)
     pdf.set_text_color(40, 40, 40)
-    booking_rooms = list(booking_rooms)
-    for i, br in enumerate(booking_rooms):
-        booking = br.booking
-        adults = br.adult_count
-        kids = len(br.kid_details)
-        first_room = booking.pk not in seen_bookings
-        pdf.set_fill_color(*(ZEBRA if i % 2 == 0 else (255, 255, 255)))
-        pdf.cell(col["room"], 7, f" {br.room.room_number}", fill=True)
-        pdf.cell(col["name"], 7, f" {booking.customer_name}", fill=True)
-        pdf.cell(col["phone"], 7, f" {booking.phone}", fill=True)
-        pdf.cell(col["adults"], 7, str(adults), fill=True, align="C")
-        pdf.cell(col["kids"], 7, str(kids), fill=True, align="C")
-        # paid/due belong to the booking as a whole — print them on its first
-        # room only, blank on the rest, so the guide reads one balance per party.
-        paid_text = f"{booking.paid_amount} " if first_room else ""
-        due_text = f"{booking.due_amount} " if first_room else ""
-        pdf.cell(col["paid"], 7, paid_text, fill=True, align="R")
-        pdf.set_font("NotoSans", "B" if (first_room and booking.due_amount > 0) else "", 9)
-        pdf.cell(col["due"], 7, due_text, fill=True, align="R",
+
+    def money_row(label_cells, paid, due, *, bold_due, fill_rgb, top_border=False):
+        """Draw one table row; label_cells is [(width, text, align), ...] that
+        together span room+name+phone+adults+kids."""
+        border = "T" if top_border else 0
+        pdf.set_fill_color(*fill_rgb)
+        for width, text, align in label_cells:
+            pdf.cell(width, row_h, text, fill=True, align=align, border=border)
+        pdf.cell(col["paid"], row_h, paid, fill=True, align="R", border=border)
+        pdf.set_font("NotoSans", "B" if bold_due else "", 9)
+        pdf.cell(col["due"], row_h, due, fill=True, align="R", border=border,
                  new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("NotoSans", "", 9)
-        if first_room:
-            seen_bookings.add(booking.pk)
-            total_paid += booking.paid_amount
-            total_due += booking.due_amount
-        total_adults += adults
-        total_kids += kids
 
-    if not booking_rooms:
+    for group in groups:
+        booking = group["booking"]
+        rooms = group["rooms"]
+        is_group = len(rooms) > 1
+        group_top_y = pdf.get_y()
+
+        for r_idx, br in enumerate(rooms):
+            adults = br.adult_count
+            kids = len(br.kid_details)
+            # A multi-room booking gets a faint gold wash so its cabins read as
+            # one block; single-room bookings keep the plain zebra striping.
+            fill_rgb = (
+                GROUP_TINT if is_group else (ZEBRA if zebra_i % 2 == 0 else (255, 255, 255))
+            )
+            # First cabin of a group carries a "· N rooms" tag after the name so
+            # the guide instantly sees the party spans several cabins.
+            name = booking.customer_name
+            if is_group and r_idx == 0:
+                name = f"{name}  · {len(rooms)} rooms"
+            label_cells = [
+                (col["room"], f" {br.room.room_number}", "L"),
+                (col["name"], f" {name}", "L"),
+                (col["phone"], f" {booking.phone}", "L"),
+                (col["adults"], str(adults), "C"),
+                (col["kids"], str(kids), "C"),
+            ]
+            if is_group:
+                # Balance shows on the group SUBTOTAL line below, not per cabin.
+                money_row(label_cells, "", "", bold_due=False, fill_rgb=fill_rgb)
+            else:
+                # Single room: balance sits right on the row, exactly as before.
+                money_row(
+                    label_cells,
+                    f"{booking.paid_amount} ",
+                    f"{booking.due_amount} ",
+                    bold_due=booking.due_amount > 0,
+                    fill_rgb=fill_rgb,
+                )
+                zebra_i += 1
+            total_adults += adults
+            total_kids += kids
+
+        if is_group:
+            # Group subtotal line: the one place this family's paid/due appears.
+            subtotal_label = [
+                (col["room"], "", "L"),
+                (
+                    col["name"] + col["phone"] + col["adults"] + col["kids"],
+                    f"   ↳ Booking {booking.booking_code} — combined balance",
+                    "L",
+                ),
+            ]
+            pdf.set_font("NotoSans", "B", 8.5)
+            money_row(
+                subtotal_label,
+                f"{booking.paid_amount} ",
+                f"{booking.due_amount} ",
+                bold_due=booking.due_amount > 0,
+                fill_rgb=GROUP_TINT,
+            )
+            pdf.set_font("NotoSans", "", 9)
+            # Gold accent bar down the left edge spanning every row of the group.
+            group_bottom_y = pdf.get_y()
+            pdf.set_fill_color(*GROUP_BAR)
+            pdf.rect(bar_x, group_top_y, 1.4, group_bottom_y - group_top_y, "F")
+
+        total_paid += booking.paid_amount
+        total_due += booking.due_amount
+
+    if not groups:
         pdf.set_font("NotoSans", "", 9)
         pdf.cell(epw, 10, "No active bookings for this package.", align="C",
                  new_x="LMARGIN", new_y="NEXT")
@@ -168,6 +252,9 @@ def generate_guide_report_pdf(package):
     pdf.cell(0, 5, "Bookings with due = 0.00 are fully paid. Collect the due amount "
                    "from each room and record it in the dashboard.", align="C",
              new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, "Rooms marked with a gold bar and \"· N rooms\" belong to ONE "
+                   "family booking — collect the combined balance once, not per room.",
+             align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 5, f"{package.ship.name} · computer-generated report", align="C")
 
     draw_watermark(pdf, package.ship.name)
