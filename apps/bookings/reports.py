@@ -100,49 +100,60 @@ def generate_guide_report_pdf(package, scope="booked"):
     pdf.set_text_shaping(True)
     epw = pdf.epw
 
-    # Header — light, logo shown directly for a clean sharp mark
+    # Header — light, logo shown directly for a clean sharp mark.
+    #
+    # Layout: title (with tour dates) on the left, and directly under it the
+    # ship's helpline numbers; the package / generated-time / scope meta sits in
+    # the top-right corner, right-aligned, so the two blocks read as a clean
+    # left-title / right-meta header.
     pdf.set_fill_color(*NAVY)
     pdf.rect(0, 0, pdf.w, 2.5, "F")  # slim brand bar
     draw_header_logo(pdf, pdf.l_margin, 6, 17)
-    pdf.set_text_color(*NAVY)
-    pdf.set_xy(pdf.l_margin + 22, 10)
-    pdf.set_font("NotoSans", "B", 15)
-    pdf.cell(epw / 2 - 22, 8, f"{package.ship.name} — Guide Collection Report")
-    pdf.set_font("NotoSans", "", 9)
-    pdf.set_text_color(*GREY)
-    pdf.cell(
-        epw / 2, 8,
-        f"{package.start_date:%d %b %Y} – {package.end_date:%d %b %Y}",
-        align="R", new_x="LMARGIN", new_y="NEXT",
-    )
+    title_x = pdf.l_margin + 22
 
-    # Authority contact numbers — top-right corner, under the tour dates.
-    # Per-ship, editable from the staff dashboard (falls back to the system
-    # default). Skip the line entirely if none are configured.
+    # ── Left: title + tour dates ──
+    pdf.set_xy(title_x, 9)
+    pdf.set_text_color(*NAVY)
+    pdf.set_font("NotoSans", "B", 15)
+    pdf.cell(epw / 2, 8, f"{package.ship.name} — Guide Collection Report",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.set_x(title_x)
+    pdf.set_font("NotoSans", "", 8)
+    pdf.set_text_color(*GREY)
+    pdf.cell(epw / 2, 5,
+             f"{package.start_date:%d %b %Y} – {package.end_date:%d %b %Y}",
+             new_x="LMARGIN", new_y="NEXT")
+    # Helpline numbers directly under the title (was the top-right corner).
+    # Per-ship, editable from the staff dashboard; skip the line if none set.
     phones = package.ship.authority_phone_list
     if phones:
+        pdf.set_x(title_x)
         pdf.set_font("NotoSans", "", 7.5)
-        pdf.set_text_color(*GREY)
-        pdf.set_xy(pdf.l_margin + epw / 2, 18)
-        pdf.cell(epw / 2, 4, "Helpline: " + "  ·  ".join(phones), align="R")
+        pdf.cell(epw / 2, 4, "Helpline: " + "  ·  ".join(phones),
+                 new_x="LMARGIN", new_y="NEXT")
 
-    pdf.set_draw_color(*NAVY)
-    pdf.set_line_width(0.5)
-    pdf.line(pdf.l_margin, 26, pdf.l_margin + epw, 26)
-    pdf.set_line_width(0.2)
-
-    pdf.set_y(32)
-    pdf.set_text_color(*GREY)
-    pdf.set_font("NotoSans", "", 8.5)
+    # ── Right: package / generated / scope, right-aligned in the top corner ──
     title = package.marketing_title or "Ship tour package"
     generated = f"{timezone.localtime(timezone.now()):%d %b %Y, %I:%M %p}"
     scope_label = "All rooms (booked + available)" if scope == "all" else "Booked rooms only"
-    pdf.cell(epw / 2, 6, f"Package: {title}")
-    pdf.cell(epw / 2, 6, f"Generated: {generated}", align="R", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("NotoSans", "", 8)
+    meta_x = pdf.l_margin + epw / 2
     pdf.set_text_color(*GREY)
-    pdf.cell(epw, 5, f"Scope: {scope_label}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(2)
+    pdf.set_font("NotoSans", "", 8.5)
+    pdf.set_xy(meta_x, 10)
+    pdf.cell(epw / 2, 5, f"Package: {title}", align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_x(meta_x)
+    pdf.set_font("NotoSans", "", 8)
+    pdf.cell(epw / 2, 5, f"Generated: {generated}", align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_x(meta_x)
+    pdf.cell(epw / 2, 5, f"Scope: {scope_label}", align="R", new_x="LMARGIN", new_y="NEXT")
+
+    # Divider rule below whichever block is taller.
+    rule_y = max(pdf.get_y(), 27)
+    pdf.set_draw_color(*NAVY)
+    pdf.set_line_width(0.5)
+    pdf.line(pdf.l_margin, rule_y, pdf.l_margin + epw, rule_y)
+    pdf.set_line_width(0.2)
+    pdf.set_y(rule_y + 3)
 
     # Table header — Pax is split into Adults and Kids so the guide can see the
     # party composition per room at a glance (not just a combined count).
