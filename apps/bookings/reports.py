@@ -157,6 +157,10 @@ def generate_guide_report_pdf(package):
         rooms = group["rooms"]
         is_group = len(rooms) > 1
         group_top_y = pdf.get_y()
+        # For a group, the combined paid/due prints ONCE, vertically centred on
+        # the group's middle cabin row — no separate subtotal line, so a 2-cabin
+        # family is 2 rows, not 3 (saves vertical space on a busy sheet).
+        balance_row = len(rooms) // 2
 
         for r_idx, br in enumerate(rooms):
             adults = br.adult_count
@@ -179,8 +183,16 @@ def generate_guide_report_pdf(package):
                 (col["kids"], str(kids), "C"),
             ]
             if is_group:
-                # Balance shows on the group SUBTOTAL line below, not per cabin.
-                money_row(label_cells, "", "", bold_due=False, fill_rgb=fill_rgb)
+                # Combined balance only on the group's middle row; blank on the
+                # rest so the number reads as one balance for the whole party.
+                on_balance_row = r_idx == balance_row
+                money_row(
+                    label_cells,
+                    f"{booking.paid_amount} " if on_balance_row else "",
+                    f"{booking.due_amount} " if on_balance_row else "",
+                    bold_due=on_balance_row and booking.due_amount > 0,
+                    fill_rgb=fill_rgb,
+                )
             else:
                 # Single room: balance sits right on the row, exactly as before.
                 money_row(
@@ -195,24 +207,6 @@ def generate_guide_report_pdf(package):
             total_kids += kids
 
         if is_group:
-            # Group subtotal line: the one place this family's paid/due appears.
-            subtotal_label = [
-                (col["room"], "", "L"),
-                (
-                    col["name"] + col["phone"] + col["adults"] + col["kids"],
-                    f"   ↳ Booking {booking.booking_code} — combined balance",
-                    "L",
-                ),
-            ]
-            pdf.set_font("NotoSans", "B", 8.5)
-            money_row(
-                subtotal_label,
-                f"{booking.paid_amount} ",
-                f"{booking.due_amount} ",
-                bold_due=booking.due_amount > 0,
-                fill_rgb=GROUP_TINT,
-            )
-            pdf.set_font("NotoSans", "", 9)
             # Gold accent bar down the left edge spanning every row of the group.
             group_bottom_y = pdf.get_y()
             pdf.set_fill_color(*GROUP_BAR)
@@ -252,8 +246,9 @@ def generate_guide_report_pdf(package):
     pdf.cell(0, 5, "Bookings with due = 0.00 are fully paid. Collect the due amount "
                    "from each room and record it in the dashboard.", align="C",
              new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 5, "Rooms marked with a gold bar and \"· N rooms\" belong to ONE "
-                   "family booking — collect the combined balance once, not per room.",
+    pdf.cell(0, 5, "Rooms marked with a gold bar and \"· N rooms\" are ONE family "
+                   "booking — their paid/due is the combined balance, shown once, "
+                   "not per room.",
              align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 5, f"{package.ship.name} · computer-generated report", align="C")
 
