@@ -204,10 +204,14 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], url_path="guide-report")
     def guide_report(self, request, pk=None):
         package = self.get_object()
-        pdf = generate_guide_report_pdf(package)
+        # ?scope=all → every cabin (booked first, then available); default
+        # "booked" → only the cabins the guide collects dues from.
+        scope = "all" if request.query_params.get("scope") == "all" else "booked"
+        pdf = generate_guide_report_pdf(package, scope=scope)
+        suffix = "-all-rooms" if scope == "all" else ""
         response = HttpResponse(pdf, content_type="application/pdf")
         response["Content-Disposition"] = (
-            f'attachment; filename="guide-report-{package.start_date}.pdf"'
+            f'attachment; filename="guide-report-{package.start_date}{suffix}.pdf"'
         )
         return response
 

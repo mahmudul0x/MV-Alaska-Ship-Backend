@@ -11,6 +11,8 @@ from decimal import Decimal
 from django.utils import timezone
 from fpdf import FPDF
 
+from apps.packages.models import PackageRoom
+
 from .branding import draw_header_logo, draw_signature_block, draw_watermark
 from .invoices import FONTS_DIR
 from .models import Booking, BookingRoom
@@ -52,14 +54,40 @@ def _grouped_booking_rows(package):
     return sorted(groups.values(), key=sort_key)
 
 
-def generate_guide_report_pdf(package):
+def _room_num_key(room_number):
+    """Numeric-aware sort key for room numbers ("9" before "10")."""
+    return (len(room_number), room_number)
+
+
+def _unbooked_rooms(package, booked_room_ids):
+    """Package rooms with NO active booking, ordered by room number — the
+    'still available' tail of the all-rooms report."""
+    rooms = (
+        PackageRoom.objects.filter(package=package)
+        .exclude(room_id__in=booked_room_ids)
+        .select_related("room__room_type")
+    )
+    return sorted(rooms, key=lambda pr: _room_num_key(pr.room.room_number))
+
+
+def generate_guide_report_pdf(package, scope="booked"):
+    """Guide collection report PDF.
+
+    scope="booked" (default): only cabins that are actually booked — the sheet
+    the guide collects dues from.
+    scope="all": every cabin on the sailing — booked ones first (with their
+    balances), then an "Available (unbooked)" section so staff see the whole
+    ship's occupancy at a glance.
+    """
     # One row per cabin, but a family's cabins are kept TOGETHER and banded so
     # the guide reads them as one party with one bill — not scattered across the
     # sheet by room number with a blank balance on the second cabin (which read
     # as "nothing owed"). paid/due belong to the whole booking, so a multi-room
-    # booking prints them once, on a per-group subtotal line; a single-room
-    # booking is unchanged. Totals sum per booking, never per room.
+    # booking prints them once, centred on its middle row; a single-room booking
+    # is unchanged. Totals sum per booking, never per room.
     groups = _grouped_booking_rows(package)
+    booked_room_ids = {br.room_id for g in groups for br in g["rooms"]}
+    unbooked = _unbooked_rooms(package, booked_room_ids) if scope == "all" else []
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -108,9 +136,13 @@ def generate_guide_report_pdf(package):
     pdf.set_font("NotoSans", "", 8.5)
     title = package.marketing_title or "Ship tour package"
     generated = f"{timezone.localtime(timezone.now()):%d %b %Y, %I:%M %p}"
+    scope_label = "All rooms (booked + available)" if scope == "all" else "Booked rooms only"
     pdf.cell(epw / 2, 6, f"Package: {title}")
     pdf.cell(epw / 2, 6, f"Generated: {generated}", align="R", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
+    pdf.set_font("NotoSans", "", 8)
+    pdf.set_text_color(*GREY)
+    pdf.cell(epw, 5, f"Scope: {scope_label}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
 
     # Table header — Pax is split into Adults and Kids so the guide can see the
     # party composition per room at a glance (not just a combined count).
@@ -220,9 +252,10 @@ def generate_guide_report_pdf(package):
         pdf.cell(epw, 10, "No active bookings for this package.", align="C",
                  new_x="LMARGIN", new_y="NEXT")
 
-    # Totals row
+    # Totals row (booked rooms only — the money the guide collects)
     pdf.set_draw_color(*RULE)
     pdf.set_font("NotoSans", "B", 9)
+    pdf.set_text_color(40, 40, 40)
     pdf.cell(col["room"] + col["name"] + col["phone"], 8, " TOTAL", border="T")
     pdf.cell(col["adults"], 8, str(total_adults), border="T", align="C")
     pdf.cell(col["kids"], 8, str(total_kids), border="T", align="C")
@@ -230,6 +263,43 @@ def generate_guide_report_pdf(package):
     pdf.set_text_color(*NAVY)
     pdf.cell(col["due"], 8, f"{total_due} ", border="T", align="R",
              new_x="LMARGIN", new_y="NEXT")
+
+    # ── Available (unbooked) rooms — only in the all-rooms report ──────────
+    # Same table columns as the booked rows above, but only the room number is
+    # filled — the guide prints the sheet and writes the customer, pax and
+    # amounts in by hand as walk-up cabins are taken on board.
+    if scope == "all":
+        pdf.ln(4)
+        pdf.set_font("NotoSans", "B", 9)
+        pdf.set_text_color(*NAVY)
+        pdf.cell(
+            epw, 6,
+            f"Available (unbooked) — {len(unbooked)} "
+            f"room{'s' if len(unbooked) != 1 else ''}  ·  fill in on board",
+            new_x="LMARGIN", new_y="NEXT",
+        )
+        if unbooked:
+            pdf.set_draw_color(*RULE)
+            for i, pr in enumerate(unbooked):
+                room = pr.room
+                pdf.set_font("NotoSans", "", 9)
+                pdf.set_text_color(40, 40, 40)
+                pdf.set_fill_color(*(ZEBRA if i % 2 == 0 else (255, 255, 255)))
+                # Room number only; every other cell left blank (bordered) so
+                # the guide can hand-write into it.
+                pdf.cell(col["room"], 7, f" {room.room_number}", fill=True, border="B")
+                pdf.cell(col["name"], 7, "", fill=True, border="B")
+                pdf.cell(col["phone"], 7, "", fill=True, border="B")
+                pdf.cell(col["adults"], 7, "", fill=True, border="B", align="C")
+                pdf.cell(col["kids"], 7, "", fill=True, border="B", align="C")
+                pdf.cell(col["paid"], 7, "", fill=True, border="B", align="R")
+                pdf.cell(col["due"], 7, "", fill=True, border="B", align="R",
+                         new_x="LMARGIN", new_y="NEXT")
+        else:
+            pdf.set_font("NotoSans", "", 8.5)
+            pdf.set_text_color(*GREY)
+            pdf.cell(epw, 7, "  Every room on this sailing is booked.",
+                     new_x="LMARGIN", new_y="NEXT")
 
     # Authorized signature (right side, below the totals)
     pdf.ln(8)
