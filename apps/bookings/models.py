@@ -410,10 +410,20 @@ class BookingRoom(models.Model):
                 f"{room_type.name} allows at most {room_type.max_kids} kids."
             )
 
+        # Membership only: the room must actually be attached to the package
+        # (so we can price against it). Availability — is_available, the admin
+        # is_blocked hold, and the "already actively booked" check — is NO
+        # LONGER read here. It is validated by the booking flow under a
+        # SELECT ... FOR UPDATE lock on the PackageRoom row
+        # (PackageRoom.assert_bookable, called from BookingCreateSerializer.
+        # create), so a plain unlocked .exists() here would only re-introduce
+        # the exact race this refactor closes: the value could flip between
+        # this read and the write. Both the public and staff booking paths run
+        # through that locked check.
         if not PackageRoom.objects.filter(
-            package=package, room_id=self.room_id, is_available=True
+            package=package, room_id=self.room_id
         ).exists():
-            errors["room"] = "This room is not available in the selected package."
+            errors["room"] = "This room is not part of the selected package."
 
         if errors:
             raise ValidationError(errors)

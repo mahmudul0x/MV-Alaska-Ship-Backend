@@ -1,11 +1,12 @@
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.postgres.constraints import ExclusionConstraint
 from django.contrib.postgres.fields.ranges import RangeOperators
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 from apps.ships.models import Room, Ship
@@ -74,6 +75,22 @@ class Package(models.Model):
             "settled (deadline is noon that day). Partially paid bookings past "
             "the deadline are cancelled and flagged for a manual refund call."
         ),
+    )
+    # Displayed duration ("3 Days · 2 Nights") for the public package card.
+    # Both blank => auto-derived from the dates (nights = date span, days =
+    # nights + 1), so a normal sailing needs no data entry. Staff may override
+    # either from the dashboard when the marketed duration differs from the raw
+    # calendar span. Never hardcoded on the frontend — the API sends the
+    # resolved values (see effective_days/effective_nights).
+    duration_days = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Leave blank to auto-calculate (nights + 1) from the dates.",
+    )
+    duration_nights = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Leave blank to auto-calculate from the dates (end − start).",
     )
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.DRAFT
@@ -205,6 +222,29 @@ class Package(models.Model):
                 }
             )
 
+        # Duration overrides are optional, but if set they must be sane and
+        # mutually consistent — a nights value ≥ days ("3 Days · 3 Nights")
+        # is exactly the kind of wrong copy this field exists to prevent.
+        if self.duration_nights is not None and self.duration_nights < 1:
+            raise ValidationError(
+                {"duration_nights": "Must be at least 1 night."}
+            )
+        if self.duration_days is not None and self.duration_days < 2:
+            raise ValidationError(
+                {"duration_days": "A multi-day tour spans at least 2 days."}
+            )
+        days = self.effective_days()
+        nights = self.effective_nights()
+        if days is not None and nights is not None and days != nights + 1:
+            raise ValidationError(
+                {
+                    "duration_days": (
+                        f"Days ({days}) must be exactly one more than nights "
+                        f"({nights}). Leave both blank to auto-calculate."
+                    )
+                }
+            )
+
     @staticmethod
     def cutoff_default_for(start_date):
         """Noon (Asia/Dhaka) the day before the given start date — PRD §5.5."""
@@ -221,6 +261,25 @@ class Package(models.Model):
             time(12, 0),
         )
         return timezone.make_aware(naive, timezone.get_default_timezone())
+
+    def effective_nights(self):
+        """Nights shown on the public card. Admin override wins; otherwise the
+        raw calendar span (10 Aug → 12 Aug = 2 nights)."""
+        if self.duration_nights is not None:
+            return self.duration_nights
+        if self.start_date and self.end_date:
+            return (self.end_date - self.start_date).days
+        return None
+
+    def effective_days(self):
+        """Days shown on the public card. Admin override wins; otherwise
+        nights + 1 (a 2-night sailing spans 3 calendar days). This is the
+        off-by-one the frontend was getting wrong — days is nights + 1, not the
+        bare date difference."""
+        if self.duration_days is not None:
+            return self.duration_days
+        nights = self.effective_nights()
+        return nights + 1 if nights is not None else None
 
     def default_cutoff(self):
         return self.cutoff_default_for(self.start_date)
@@ -276,6 +335,12 @@ class Package(models.Model):
     is_bookable.boolean = True
 
 
+class RoomBlocked(ValidationError):
+    """A room block/unblock was rejected — booked room, or the package is no
+    longer live. Raised by PackageRoom.block()/unblock() so callers (staff API)
+    can turn it into a clean 400 instead of a 500."""
+
+
 class PackageRoom(models.Model):
     package = models.ForeignKey(
         Package, on_delete=models.CASCADE, related_name="package_rooms"
@@ -283,7 +348,34 @@ class PackageRoom(models.Model):
     room = models.ForeignKey(
         Room, on_delete=models.PROTECT, related_name="package_rooms"
     )
+    #: Whether this room is part of the package's sellable inventory at all.
+    #: Set once when rooms are attached; unrelated to the admin hold below.
     is_available = models.BooleanField(default=True)
+    #: Admin hold: staff can withhold a specific room from sale on a live
+    #: sailing (a cabin kept for crew, a maintenance issue, a VIP hold) without
+    #: removing it from inventory. Distinct from `is_available` (which is the
+    #: room's baseline presence on the package) and from "booked" (a customer
+    #: holds it) — a blocked room is surfaced to customers as "booked" (simply
+    #: not on sale; the public serializer never distinguishes the two), so the
+    #: internal reason never leaks, and can be released at any time while the
+    #: package is live. Booked rooms cannot be blocked; see block().
+    is_blocked = models.BooleanField(
+        default=False,
+        help_text="Admin hold — withhold this room from sale without deleting it.",
+    )
+    block_reason = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Internal note on why the room is held (never shown to customers).",
+    )
+    blocked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    blocked_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -300,6 +392,139 @@ class PackageRoom(models.Model):
             raise ValidationError(
                 {"room": "Room belongs to a different ship than this package."}
             )
+
+    def _is_actively_booked(self):
+        """True if a live (non-cancelled) booking holds this room on this
+        package — the partial unique constraint's is_active flag is the single
+        truth for 'still held'."""
+        # Imported here to avoid a circular import (bookings imports packages).
+        from apps.bookings.models import BookingRoom
+
+        return BookingRoom.objects.filter(
+            package_id=self.package_id, room_id=self.room_id, is_active=True
+        ).exists()
+
+    @classmethod
+    def lock_for_booking(cls, *, package_id, room_id):
+        """Acquire the SELECT ... FOR UPDATE lock on the (package, room) row and
+        return the locked PackageRoom, or None if the room is not attached to
+        the package.
+
+        This is the single logical resource that serialises the booking and the
+        admin-block flows: both take this same row lock before deciding whether
+        the room may change hands, so a booking and a block for the same room
+        can no longer proceed at the same instant. Callers hold the lock (i.e.
+        stay inside the surrounding transaction) while they read availability
+        and write, so the state they validated cannot shift underneath them.
+        """
+        return (
+            cls.objects.select_for_update()
+            .select_related("package", "room__room_type")
+            .filter(package_id=package_id, room_id=room_id)
+            .first()
+        )
+
+    def assert_bookable(self):
+        """Validate — while the caller holds this row's FOR UPDATE lock — that
+        the room may still be sold on this package: it is in inventory, not on
+        admin hold, and not already actively booked. Because the lock is held,
+        no concurrent block or booking can change any of these between this
+        check and the caller's write.
+
+        The exception TYPE preserves the pre-existing API contract:
+        - is_blocked (admin hold) → RoomBlocked, a ValidationError → HTTP 400.
+          A held room reads to the customer as "not on sale", a client-input
+          problem, not a race.
+        - not in inventory / already actively booked → RoomUnavailable →
+          HTTP 409 Conflict, the lost-a-race semantics.
+        """
+        from apps.bookings.exceptions import RoomUnavailable
+
+        if self.is_blocked:
+            raise RoomBlocked(
+                "This room is not available in the selected package."
+            )
+        if not self.is_available:
+            raise RoomUnavailable()
+        if self._is_actively_booked():
+            raise RoomUnavailable()
+
+    def block(self, *, user=None, reason=""):
+        """Withhold this room from sale (admin hold). Acquires the
+        PackageRoom row lock (lock_for_booking's resource) and re-checks the
+        booked/live state before flipping the flag.
+
+        Booking creation now takes the SAME row lock as its first act inside its
+        transaction (BookingCreateSerializer.create), so the two flows serialise
+        on this one row: whichever grabs the lock first runs to commit while the
+        other waits, and the loser then re-reads the just-committed state. A room
+        can therefore no longer end up flagged is_blocked while a live booking
+        also holds it — the block sees the booking (and rejects) or the booking
+        sees the block (and 409s).
+
+        Rejects (RoomBlocked) when the package is not live (cancelled/completed)
+        or the room is already actively booked."""
+        with transaction.atomic():
+            pr = PackageRoom.objects.select_for_update().select_related(
+                "package"
+            ).get(pk=self.pk)
+            if pr.package.status in (
+                Package.Status.CANCELLED,
+                Package.Status.COMPLETED,
+            ):
+                raise RoomBlocked(
+                    "This package is "
+                    f"{pr.package.get_status_display().lower()} — rooms can no "
+                    "longer be blocked or released."
+                )
+            if pr._is_actively_booked():
+                raise RoomBlocked(
+                    f"Room {pr.room.room_number} is booked — cancel the booking "
+                    "before blocking it."
+                )
+            pr.is_blocked = True
+            pr.block_reason = (reason or "").strip()[:200]
+            pr.blocked_by = user
+            pr.blocked_at = timezone.now()
+            pr.save(
+                update_fields=[
+                    "is_blocked",
+                    "block_reason",
+                    "blocked_by",
+                    "blocked_at",
+                ]
+            )
+        # Keep the caller's instance in sync with what was persisted.
+        self.is_blocked = pr.is_blocked
+        self.block_reason = pr.block_reason
+        self.blocked_by = pr.blocked_by
+        self.blocked_at = pr.blocked_at
+        return self
+
+    def unblock(self):
+        """Release an admin hold. Allowed on any live package (a cancelled or
+        completed package can't be edited, but an already-blocked room there is
+        harmless — the package is over — so unblock is simply a no-op-safe
+        clear here rather than a hard reject)."""
+        with transaction.atomic():
+            pr = PackageRoom.objects.select_for_update().get(pk=self.pk)
+            pr.is_blocked = False
+            pr.block_reason = ""
+            pr.blocked_by = None
+            pr.blocked_at = None
+            pr.save(
+                update_fields=[
+                    "is_blocked",
+                    "block_reason",
+                    "blocked_by",
+                    "blocked_at",
+                ]
+            )
+        self.is_blocked = False
+        self.block_reason = ""
+        self.blocked_by = None
+        self.blocked_at = None
+        return self
 
 
 class KidPricingRule(models.Model):

@@ -75,8 +75,18 @@ class BookingQuoteSerializer(serializers.Serializer):
         return attrs
 
     def _validate_room(self, package, index, entry):
-        """Per-room availability + pax limits. Errors are keyed by room index so
-        the frontend can point at the offending cabin."""
+        """Per-room membership + pax limits. Errors are keyed by room index so
+        the frontend can point at the offending cabin.
+
+        Availability (is_available, the admin is_blocked hold, and "already
+        booked") is deliberately NOT checked here: this runs before any
+        transaction, so a plain unlocked read would be the very check-then-act
+        race this refactor removes. The authoritative availability gate is the
+        SELECT ... FOR UPDATE check in BookingCreateSerializer.create
+        (PackageRoom.assert_bookable). This method still runs for the quote
+        endpoint — where there is nothing to lock — so keeping only membership
+        and pax here means a quote never asserts an availability it cannot
+        hold."""
         room = entry["room"]
         kid_details = entry.get("kid_details") or []
 
@@ -86,13 +96,6 @@ class BookingQuoteSerializer(serializers.Serializer):
                 {"rooms": {index: {"room_id": "This room is not part of the "
                                               "selected package."}}}
             )
-        if not package_room.is_available:
-            raise RoomUnavailable()
-        if (
-            BookingRoom.objects.filter(package=package, room=room, is_active=True)
-            .exists()
-        ):
-            raise RoomUnavailable()
 
         room_type = room.room_type
         errors = {}
@@ -138,20 +141,45 @@ class BookingCreateSerializer(BookingQuoteSerializer):
         rooms_data = validated_data.pop("rooms")
         package = validated_data["package"]
         booking = Booking(**validated_data)
+        # Lock every PackageRoom this booking touches, ordered by room id so two
+        # multi-room bookings that overlap can never deadlock (both grab the
+        # rows in the same order). Computed up front so the exact same set of
+        # ids is locked, in order, on both the first attempt and any retry.
+        room_ids = sorted(entry["room"].pk for entry in rooms_data)
         # Two insert attempts: a booking_code collision (two concurrent
         # requests drawing the same random code, ~2^-32) must be retried
         # with a fresh code — not misreported as a lost room race.
         for retry_left in (True, False):
             try:
                 with transaction.atomic():
+                    # FIRST thing inside the transaction: take the FOR UPDATE
+                    # lock on each PackageRoom row and validate availability
+                    # while holding it. This is the single logical resource the
+                    # admin-block flow also locks (PackageRoom.block), so a block
+                    # and this booking now serialise on the same row instead of
+                    # racing on two different guards. The plain .exists()
+                    # availability read that used to live in BookingRoom.clean()
+                    # is replaced by this locked check — nothing can flip
+                    # is_blocked / is_active between the check and the write.
+                    for room_id in room_ids:
+                        package_room = PackageRoom.lock_for_booking(
+                            package_id=package.pk, room_id=room_id
+                        )
+                        if package_room is None:
+                            # Membership was validated in the serializer; a miss
+                            # here means the row vanished concurrently — treat it
+                            # as unavailable rather than a 500.
+                            raise RoomUnavailable()
+                        package_room.assert_bookable()
+
                     booking.full_clean()
                     booking.save()
-                    # Each room validates its own pax/availability and prices
-                    # itself in clean(); the partial unique constraint on
-                    # BookingRoom is the final double-booking guard for true
-                    # races. The whole set is created inside one transaction, so
-                    # if any room is lost to a race the entire booking rolls
-                    # back — a family never ends up half-booked.
+                    # Each room prices itself in clean(); the partial unique
+                    # constraint on BookingRoom remains the final double-booking
+                    # guard for any true race that still slips through. The whole
+                    # set is created inside one transaction, so if any room is
+                    # lost the entire booking rolls back — a family never ends up
+                    # half-booked.
                     for entry in rooms_data:
                         booking_room = BookingRoom(
                             booking=booking,

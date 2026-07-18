@@ -3,6 +3,7 @@
 import hashlib
 
 from django.conf import settings
+from django.db import transaction
 from rest_framework.throttling import SimpleRateThrottle
 
 
@@ -10,12 +11,16 @@ def create_booking(package, rooms, **booking_fields):
     """Create a Booking with one or more BookingRooms at the model layer.
 
     `rooms` is a list of dicts {"room":…, "adult_count":…, "kid_details":…}.
-    Each BookingRoom is full_clean()'d (so pax/availability/pricing validation
-    fires exactly as in production), then the booking is repriced to the sum of
-    its rooms. Returns the saved booking. The single place model-layer tests
-    build a booking, so the multi-room construction lives in one spot.
+    Mirrors production (BookingCreateSerializer.create): the FIRST thing inside
+    the transaction is the SELECT ... FOR UPDATE lock + availability check on
+    each PackageRoom (PackageRoom.assert_bookable) — the same lock the admin
+    block flow takes — after which each BookingRoom is full_clean()'d (pax +
+    pricing) and the booking is repriced to the sum of its rooms. Returns the
+    saved booking. The single place model-layer tests build a booking, so the
+    lock-then-validate order lives in exactly one spot here too.
     """
     from apps.bookings.models import Booking, BookingRoom
+    from apps.packages.models import PackageRoom
 
     defaults = {
         "customer_name": "Rahim Uddin",
@@ -24,20 +29,32 @@ def create_booking(package, rooms, **booking_fields):
     }
     defaults.update(booking_fields)
     booking = Booking(package=package, **defaults)
-    booking.full_clean()
-    booking.save()
-    for entry in rooms:
-        br = BookingRoom(
-            booking=booking,
-            package=package,
-            room=entry["room"],
-            adult_count=entry["adult_count"],
-            kid_details=entry.get("kid_details") or [],
-        )
-        br.full_clean()
-        br.save()
-    booking.reprice()
-    booking.save(update_fields=["total_amount", "price_snapshot", "due_amount"])
+    room_ids = sorted(entry["room"].pk for entry in rooms)
+    with transaction.atomic():
+        for room_id in room_ids:
+            package_room = PackageRoom.lock_for_booking(
+                package_id=package.pk, room_id=room_id
+            )
+            if package_room is None:
+                from apps.bookings.exceptions import RoomUnavailable
+
+                raise RoomUnavailable()
+            package_room.assert_bookable()
+
+        booking.full_clean()
+        booking.save()
+        for entry in rooms:
+            br = BookingRoom(
+                booking=booking,
+                package=package,
+                room=entry["room"],
+                adult_count=entry["adult_count"],
+                kid_details=entry.get("kid_details") or [],
+            )
+            br.full_clean()
+            br.save()
+        booking.reprice()
+        booking.save(update_fields=["total_amount", "price_snapshot", "due_amount"])
     return booking
 
 
