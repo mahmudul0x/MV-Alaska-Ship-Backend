@@ -426,7 +426,9 @@ class EscalatedPaymentTests(PaymentQABase):
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
         second = self.make_booking()  # same room, same package -> succeeds
-        self.assertEqual(second.room_id, booking.room_id)
+        self.assertEqual(
+            second.rooms.first().room_id, booking.rooms.first().room_id
+        )
 
     def test_T9b_FIXED_staff_can_settle_a_stuck_payment_that_did_capture_money(self):
         """The other half: the merchant panel shows the money WAS taken. Staff
@@ -715,17 +717,27 @@ class DjangoAdminRepricingTests(PaymentQABase):
         # payment now freezes the price, so this no longer re-prices anything.
         model_admin = BookingAdmin(Booking, AdminSite())
         FormClass = model_admin.get_form(None, booking, change=True)
+        # room/adult_count/kid_details moved to the BookingRoom inline, so the
+        # Booking admin form no longer carries them — the rooms are edited on
+        # their own inline formset (not exercised here).
         data = {
             "customer_name": booking.customer_name,
             "phone": "01800000000",
             "email": booking.email,
             "package": booking.package_id,
-            "room": booking.room_id,
-            "adult_count": booking.adult_count,
-            "kid_details": "[]",
             "status": booking.status,
             "refund_required": False,
             "refund_note": "",
+            # Empty inline management form so the change form validates without
+            # touching the rooms.
+            "rooms-TOTAL_FORMS": "0",
+            "rooms-INITIAL_FORMS": "0",
+            "rooms-MIN_NUM_FORMS": "0",
+            "rooms-MAX_NUM_FORMS": "1000",
+            "payments-TOTAL_FORMS": "0",
+            "payments-INITIAL_FORMS": "0",
+            "status_logs-TOTAL_FORMS": "0",
+            "status_logs-INITIAL_FORMS": "0",
         }
         form = FormClass(data, instance=Booking.objects.get(pk=booking.pk))
         self.assertTrue(form.is_valid(), form.errors)

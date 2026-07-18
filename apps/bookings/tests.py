@@ -9,7 +9,7 @@ from django.utils import timezone
 from apps.packages.models import KidPricingRule, Package, PackageRoom
 from apps.ships.models import Room, RoomType, Ship
 
-from .models import Booking, Payment
+from .models import Booking, BookingRoom, Payment
 from .pricing import calculate_total
 
 
@@ -55,20 +55,46 @@ class BookingBaseTestCase(TestCase):
             min_age=8, max_age=99, charge_type=KidPricingRule.ChargeType.FULL_ADULT
         )
 
-    def make_booking(self, **kwargs):
-        defaults = {
+    def make_booking(self, rooms=None, **kwargs):
+        """Create a booking with one or more rooms.
+
+        Single-room legacy call: make_booking(room=..., adult_count=...,
+        kid_details=...) — the per-room fields are validated on the
+        BookingRoom, exactly as before. Multi-room: pass
+        rooms=[{"room":…, "adult_count":…, "kid_details":…}, …].
+
+        full_clean() runs on each BookingRoom so pax/availability/pricing
+        errors surface as they did when they lived on Booking.
+        """
+        room = kwargs.pop("room", self.room_2p)
+        adult_count = kwargs.pop("adult_count", 2)
+        kid_details = kwargs.pop("kid_details", [])
+        if rooms is None:
+            rooms = [
+                {"room": room, "adult_count": adult_count, "kid_details": kid_details}
+            ]
+        booking_defaults = {
             "customer_name": "Rahim Uddin",
             "phone": "01700000000",
             "email": "rahim@example.com",
             "package": self.package,
-            "room": self.room_2p,
-            "adult_count": 2,
-            "kid_details": [],
         }
-        defaults.update(kwargs)
-        booking = Booking(**defaults)
+        booking_defaults.update(kwargs)
+        booking = Booking(**booking_defaults)
         booking.full_clean()
         booking.save()
+        for entry in rooms:
+            br = BookingRoom(
+                booking=booking,
+                package=booking.package,
+                room=entry["room"],
+                adult_count=entry["adult_count"],
+                kid_details=entry.get("kid_details", []),
+            )
+            br.full_clean()
+            br.save()
+        booking.reprice()
+        booking.save(update_fields=["total_amount", "price_snapshot", "due_amount"])
         return booking
 
 
@@ -146,11 +172,17 @@ class PaxLimitTests(BookingBaseTestCase):
 class DoubleBookingTests(BookingBaseTestCase):
     def test_same_room_same_package_blocked(self):
         self.make_booking()
+        # A second active hold on the same (package, room) violates the partial
+        # unique constraint on BookingRoom.
+        booking = Booking.objects.create(
+            customer_name="Karim",
+            phone="01800000000",
+            email="karim@example.com",
+            package=self.package,
+        )
         with self.assertRaises(IntegrityError):
-            Booking.objects.create(
-                customer_name="Karim",
-                phone="01800000000",
-                email="karim@example.com",
+            BookingRoom.objects.create(
+                booking=booking,
                 package=self.package,
                 room=self.room_2p,
                 adult_count=1,
@@ -161,7 +193,7 @@ class DoubleBookingTests(BookingBaseTestCase):
         first.status = Booking.Status.CANCELLED
         first.save()
         second = self.make_booking(customer_name="Karim")
-        self.assertEqual(second.room, self.room_2p)
+        self.assertEqual(second.rooms.first().room, self.room_2p)
 
 
 class PaymentTests(BookingBaseTestCase):

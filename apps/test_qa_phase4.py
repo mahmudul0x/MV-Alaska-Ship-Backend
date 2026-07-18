@@ -56,14 +56,21 @@ class QaPhase4TestCase(ThrottlelessTestMixin, APITestCase):
         ) = build_fixtures(ship_name="QA Ship P4")
 
     def payload(self, **overrides):
+        room_id = overrides.pop("room_id", self.room_4p.id)
+        adult_count = overrides.pop("adult_count", 2)
+        kid_details = overrides.pop("kid_details", [])
         data = {
             "package_id": self.package.id,
-            "room_id": self.room_4p.id,
             "customer_name": "Rahim Uddin",
             "phone": "01700000000",
             "email": "rahim@example.com",
-            "adult_count": 2,
-            "kid_details": [],
+            "rooms": [
+                {
+                    "room_id": room_id,
+                    "adult_count": adult_count,
+                    "kid_details": kid_details,
+                }
+            ],
         }
         data.update(overrides)
         return data
@@ -345,12 +352,12 @@ class BackendEnforcementTests(QaPhase4TestCase):
             "/api/staff/bookings/",
             {
                 "package_id": self.package.id,
-                "room_id": self.room_4p.id,
+                "rooms": [
+                    {"room_id": self.room_4p.id, "adult_count": 2, "kid_details": []}
+                ],
                 "customer_name": "Walk-in Guest",
                 "phone": "01800000000",
                 "email": "walkin@example.com",
-                "adult_count": 2,
-                "kid_details": [],
             },
             format="json",
         )

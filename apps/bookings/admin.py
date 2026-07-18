@@ -4,7 +4,19 @@ from django.urls import reverse
 from django.utils.html import format_html
 
 from .invoices import generate_invoice_pdf, send_invoice_email
-from .models import Booking, BookingStatusLog, Invoice, Payment
+from .models import Booking, BookingRoom, BookingStatusLog, Invoice, Payment
+
+
+class BookingRoomInline(admin.TabularInline):
+    model = BookingRoom
+    extra = 0
+    can_delete = False
+    # room/pax define the booking; the priced subtotal is computed server-side.
+    fields = ("room", "adult_count", "kid_details", "room_subtotal", "is_active")
+    readonly_fields = ("room_subtotal", "is_active")
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 class PaymentInline(admin.TabularInline):
@@ -43,7 +55,6 @@ class BookingAdmin(admin.ModelAdmin):
         "customer_name",
         "phone",
         "package",
-        "room",
         "total_pax",
         "total_amount",
         "paid_amount",
@@ -56,17 +67,12 @@ class BookingAdmin(admin.ModelAdmin):
     # Amounts are always computed server-side (pricing service / payments),
     # never entered by hand.
     readonly_fields = ("booking_code", "total_amount", "paid_amount", "due_amount")
-    inlines = [PaymentInline, BookingStatusLogInline]
+    inlines = [BookingRoomInline, PaymentInline, BookingStatusLogInline]
     fieldsets = (
         ("Customer", {"fields": ("customer_name", "phone", "email")}),
         (
             "Trip",
-            {
-                "fields": (
-                    "package", "room", "adult_count", "kid_details",
-                    "special_requests",
-                )
-            },
+            {"fields": ("package", "special_requests")},
         ),
         (
             "Amounts (auto-calculated)",

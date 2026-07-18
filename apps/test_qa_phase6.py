@@ -103,8 +103,9 @@ class InvoiceContentTests(InvoiceProbeBase):
         self.assertIn(booking.booking_code, text)
         self.assertIn(invoice_number(invoice), text)
         # Trip
-        self.assertIn(booking.room.room_number, text)
-        self.assertIn(booking.room.room_type.name, text)
+        booking_room = booking.rooms.first()
+        self.assertIn(booking_room.room.room_number, text)
+        self.assertIn(booking_room.room.room_type.name, text)
         self.assertIn(f"{booking.package.start_date:%d %b %Y}", text)
         self.assertIn(f"{booking.package.end_date:%d %b %Y}", text)
         # Pax
@@ -475,13 +476,24 @@ class InvoiceEdgeCaseTests(InvoiceProbeBase):
         self.assertIn("1500.00", text)
         self.assertIn("8000.00", text)
 
-    def test_4d_BUG_multi_room_booking_is_not_representable(self):
-        """A Booking has exactly ONE room FK. A family taking two cabins is two
-        separate bookings -> two separate invoices, two separate payments. The
-        invoice can never show 'multiple rooms'."""
-        field = Booking._meta.get_field("room")
-        self.assertTrue(field.many_to_one)
-        self.assertFalse(hasattr(Booking, "rooms"))
+    def test_4d_FIXED_multi_room_booking_is_representable(self):
+        """A booking now holds MANY rooms (BookingRoom rows) — a family taking
+        two cabins is ONE booking, one payment, one invoice that itemises both
+        rooms. (Was the reverse: the old single room FK could not represent it.)"""
+        booking = self.make_booking(
+            rooms=[
+                {"room": self.room_4p, "adult_count": 2, "kid_details": []},
+                {"room": self.room_2p, "adult_count": 2, "kid_details": []},
+            ]
+        )
+        self.assertEqual(booking.rooms.count(), 2)
+        # 4P: 3500 + 2×3000 = 9500; 2P: 2000 + 2×3000 = 8000 → 17500 total.
+        self.assertEqual(booking.total_amount, Decimal("17500.00"))
+        self.settle(booking)
+        text = pdf_text(pdf_bytes_of(self.latest_invoice(booking)))
+        # Both cabins appear on the single invoice.
+        self.assertIn(self.room_4p.room_number, text)
+        self.assertIn(self.room_2p.room_number, text)
 
     def test_4e_FIXED_kid_pricing_rule_change_cannot_rewrite_an_issued_invoice(self):
         """M1. The breakdown used to be recomputed at RENDER time from today's
@@ -505,13 +517,16 @@ class InvoiceEdgeCaseTests(InvoiceProbeBase):
         self.assertIn("1500.00", text)  # ...the price actually charged does
         self.assertIn("8000.00", text)
 
-        # And the line items reconcile to the total, as an invoice must.
-        snap = booking.price_snapshot
-        line_items = (
-            Decimal(snap["room_base"])
-            + Decimal(snap["adults_subtotal"])
-            + sum(Decimal(k["charge"]) for k in snap["kids"])
-        )
+        # And the line items reconcile to the total, as an invoice must. The
+        # booking snapshot is now {"rooms": [<per-room snapshot>, …]}; sum every
+        # room's items.
+        line_items = Decimal("0.00")
+        for room_snap in booking.price_snapshot["rooms"]:
+            line_items += (
+                Decimal(room_snap["room_base"])
+                + Decimal(room_snap["adults_subtotal"])
+                + sum(Decimal(k["charge"]) for k in room_snap["kids"])
+            )
         self.assertEqual(line_items, booking.total_amount)
 
     def test_4f_zero_total_booking(self):

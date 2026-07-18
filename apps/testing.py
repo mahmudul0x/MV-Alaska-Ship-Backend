@@ -6,6 +6,41 @@ from django.conf import settings
 from rest_framework.throttling import SimpleRateThrottle
 
 
+def create_booking(package, rooms, **booking_fields):
+    """Create a Booking with one or more BookingRooms at the model layer.
+
+    `rooms` is a list of dicts {"room":…, "adult_count":…, "kid_details":…}.
+    Each BookingRoom is full_clean()'d (so pax/availability/pricing validation
+    fires exactly as in production), then the booking is repriced to the sum of
+    its rooms. Returns the saved booking. The single place model-layer tests
+    build a booking, so the multi-room construction lives in one spot.
+    """
+    from apps.bookings.models import Booking, BookingRoom
+
+    defaults = {
+        "customer_name": "Rahim Uddin",
+        "phone": "01700000000",
+        "email": "rahim@example.com",
+    }
+    defaults.update(booking_fields)
+    booking = Booking(package=package, **defaults)
+    booking.full_clean()
+    booking.save()
+    for entry in rooms:
+        br = BookingRoom(
+            booking=booking,
+            package=package,
+            room=entry["room"],
+            adult_count=entry["adult_count"],
+            kid_details=entry.get("kid_details") or [],
+        )
+        br.full_clean()
+        br.save()
+    booking.reprice()
+    booking.save(update_fields=["total_amount", "price_snapshot", "due_amount"])
+    return booking
+
+
 def sign_ipn(payload):
     """Return the payload with a genuine verify_sign/verify_key pair attached
     (SSLCommerz's documented MD5 scheme, computed with the configured store

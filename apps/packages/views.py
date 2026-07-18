@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from apps.bookings.models import Booking
+from apps.bookings.models import BookingRoom
 
 from .models import Package, PackageRoom
 from .serializers import (
@@ -41,9 +41,13 @@ class PackageViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True)
     def rooms(self, request, pk=None):
         package = self.get_object()
-        active_booking = Booking.objects.filter(
-            package_id=OuterRef("package_id"), room_id=OuterRef("room_id")
-        ).exclude(status=Booking.Status.CANCELLED)
+        # A room is booked if any active booking holds it. is_active mirrors
+        # "still held" (cancelling frees it), so this needs no status exclude.
+        active_booking = BookingRoom.objects.filter(
+            package_id=OuterRef("package_id"),
+            room_id=OuterRef("room_id"),
+            is_active=True,
+        )
         package_rooms = (
             PackageRoom.objects.filter(package=package)
             .select_related("room__room_type")

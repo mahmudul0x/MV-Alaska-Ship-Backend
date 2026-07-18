@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 
 from apps.bookings.models import Booking, Payment
 from apps.bookings.test_api import build_fixtures
-from apps.testing import ThrottlelessTestMixin, sign_ipn
+from apps.testing import ThrottlelessTestMixin, create_booking, sign_ipn
 
 GATEWAY_URL = "https://sandbox.sslcommerz.com/gwprocess/testsession"
 
@@ -32,17 +32,11 @@ class PaymentRaceTests(ThrottlelessTestMixin, TransactionTestCase):
         ) = build_fixtures()
 
     def make_booking(self):
-        b = Booking(
-            customer_name="Rahim Uddin",
-            phone="01700000000",
-            email="rahim@example.com",
-            package=self.package,
-            room=self.room_4p,
-            adult_count=2,
+        # total 9500.00
+        return create_booking(
+            self.package,
+            rooms=[{"room": self.room_4p, "adult_count": 2, "kid_details": []}],
         )
-        b.full_clean()
-        b.save()
-        return b  # total 9500.00
 
     def initiate(self, booking, payload):
         with patch(

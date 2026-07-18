@@ -55,8 +55,11 @@ class PolicyContradictionTests(PaymentQABase):
         resp = self.client.post(
             "/api/bookings/",
             {
-                "package_id": self.package.pk, "room_id": self.room_4p.pk,
-                "adult_count": 2, "customer_name": "Walk In",
+                "package_id": self.package.pk,
+                "rooms": [
+                    {"room_id": self.room_4p.pk, "adult_count": 2, "kid_details": []}
+                ],
+                "customer_name": "Walk In",
                 "phone": "01799999999", "email": "w@e.com",
             },
             format="json",

@@ -17,7 +17,7 @@ from apps.bookings.models import Booking, Payment
 from apps.bookings.test_api import build_fixtures
 from apps.packages.models import Package, PackageRoom
 from apps.ships.models import Room, Ship
-from apps.testing import ThrottlelessTestMixin
+from apps.testing import ThrottlelessTestMixin, create_booking
 
 User = get_user_model()
 
@@ -55,17 +55,10 @@ class QaPhase1cTestCase(ThrottlelessTestMixin, APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
 
     def make_booking(self, room=None, package=None, status_=Booking.Status.PENDING):
-        booking = Booking(
-            customer_name="Rahim Uddin",
-            phone="01700000000",
-            email="rahim@example.com",
-            package=package or self.package,
-            room=room or self.room_4p,
-            adult_count=2,
-            kid_details=[],
+        booking = create_booking(
+            package or self.package,
+            rooms=[{"room": room or self.room_4p, "adult_count": 2, "kid_details": []}],
         )
-        booking.full_clean()
-        booking.save()
         if status_ != Booking.Status.PENDING:
             booking.status = status_
             booking.save()
@@ -176,8 +169,7 @@ class InactivePackageBookingTests(QaPhase1cTestCase):
             "/api/bookings/",
             {
                 "package_id": self.package.id,
-                "room_id": self.room_4p.id,
-                "adult_count": 2,
+                "rooms": [{"room_id": self.room_4p.id, "adult_count": 2}],
                 "customer_name": "Karim",
                 "phone": "01800000000",
                 "email": "karim@example.com",
@@ -191,8 +183,7 @@ class InactivePackageBookingTests(QaPhase1cTestCase):
             "/api/staff/bookings/",
             {
                 "package_id": cancelled.id,
-                "room_id": self.room_4p.id,
-                "adult_count": 2,
+                "rooms": [{"room_id": self.room_4p.id, "adult_count": 2}],
                 "customer_name": "Jorim",
                 "phone": "01900000000",
                 "email": "jorim@example.com",
@@ -220,8 +211,7 @@ class InactivePackageBookingTests(QaPhase1cTestCase):
             "/api/staff/bookings/",
             {
                 "package_id": draft.id,
-                "room_id": self.room_2p.id,
-                "adult_count": 2,
+                "rooms": [{"room_id": self.room_2p.id, "adult_count": 2}],
                 "customer_name": "Jorim",
                 "phone": "01900000000",
                 "email": "jorim@example.com",

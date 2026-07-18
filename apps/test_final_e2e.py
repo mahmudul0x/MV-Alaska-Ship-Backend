@@ -105,18 +105,23 @@ class FinalEndToEndFlowTests(ThrottlelessTestMixin, APITestCase):
         # 2 adults + kid aged 2 (free tier) + kid aged 5 (fixed 1500 tier).
         quote_req = {
             "package_id": self.package.id,
-            "room_id": self.room_4p.id,
-            "adult_count": 2,
-            "kid_details": [{"age": 2}, {"age": 5}],
+            "rooms": [
+                {
+                    "room_id": self.room_4p.id,
+                    "adult_count": 2,
+                    "kid_details": [{"age": 2}, {"age": 5}],
+                }
+            ],
         }
         resp = self.client.post("/api/bookings/quote/", quote_req, format="json")
         self.assertEqual(resp.status_code, 200, resp.data)
         # base 3500 + 2×3000 adults + 0 (age 2) + 1500 (age 5) = 11000
-        self.assertEqual(Decimal(resp.data["total"]), Decimal("11000.00"))
-        kid_charges = {kid["age"]: Decimal(kid["charge"]) for kid in resp.data["kids"]}
+        self.assertEqual(Decimal(resp.data["grand_total"]), Decimal("11000.00"))
+        room_bd = resp.data["rooms"][0]
+        kid_charges = {kid["age"]: Decimal(kid["charge"]) for kid in room_bd["kids"]}
         self.assertEqual(kid_charges, {2: Decimal("0.00"), 5: Decimal("1500.00")},
                          "kid pricing follows the age tiers (0-3 free, 3-8 fixed)")
-        expected_total = Decimal(resp.data["total"])
+        expected_total = Decimal(resp.data["grand_total"])
 
         # ---- 4. COUPON — documented N/A ----------------------------------
         # No coupon/discount feature exists anywhere in the system (verified
@@ -129,7 +134,7 @@ class FinalEndToEndFlowTests(ThrottlelessTestMixin, APITestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(
-            Decimal(resp.data["total"]),
+            Decimal(resp.data["grand_total"]),
             expected_total,
             "a client-sent coupon/discount must not move the price",
         )

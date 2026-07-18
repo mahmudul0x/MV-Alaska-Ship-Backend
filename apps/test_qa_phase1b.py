@@ -158,8 +158,7 @@ class BookingThrottleScopeTests(APITestCase):
         submit the booking itself."""
         quote_payload = {
             "package_id": self.package.id,
-            "room_id": self.room_4p.id,
-            "adult_count": 1,
+            "rooms": [{"room_id": self.room_4p.id, "adult_count": 1}],
         }
         for i in range(10):
             response = self.client.post(
@@ -172,12 +171,12 @@ class BookingThrottleScopeTests(APITestCase):
             "/api/bookings/",
             {
                 "package_id": self.package.id,
-                "room_id": self.room_4p.id,
                 "customer_name": "QA Customer",
                 "phone": "01700000000",
                 "email": "qa@example.com",
-                "adult_count": 2,
-                "kid_details": [],
+                "rooms": [
+                    {"room_id": self.room_4p.id, "adult_count": 2, "kid_details": []}
+                ],
             },
             format="json",
         )

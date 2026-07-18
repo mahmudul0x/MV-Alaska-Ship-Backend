@@ -18,7 +18,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from apps.bookings import invoices, payment_service
-from apps.bookings.models import Booking, Invoice, Payment
+from apps.bookings.models import Booking, BookingRoom, Invoice, Payment
 from apps.bookings.reports import generate_guide_report_pdf
 from apps.bookings.serializers import BookingPublicSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
@@ -188,11 +188,13 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
             .select_related("room__room_type")
             .order_by("room__floor_number", "room__room_number")
         )
+        # room_id → the BookingRoom that actively holds it (its own pax + parent
+        # booking). is_active mirrors "still held", so cancelled rooms are out.
         bookings_by_room = {
-            b.room_id: b
-            for b in Booking.objects.filter(package=package).exclude(
-                status=Booking.Status.CANCELLED
-            )
+            br.room_id: br
+            for br in BookingRoom.objects.filter(
+                package=package, is_active=True
+            ).select_related("booking")
         }
         serializer = StaffPackageRoomSerializer(
             package_rooms, many=True, context={"bookings_by_room": bookings_by_room}
@@ -215,8 +217,10 @@ class StaffBookingViewSet(viewsets.ModelViewSet):
     pagination_class = StaffPagination
 
     def get_queryset(self):
-        qs = Booking.objects.select_related("package__ship", "room__room_type").order_by(
-            "-created_at"
+        qs = (
+            Booking.objects.select_related("package__ship")
+            .prefetch_related("rooms__room__room_type")
+            .order_by("-created_at")
         )
         params = self.request.query_params
         if params.get("package"):
@@ -599,14 +603,17 @@ class StaffOverviewView(APIView):
                 "booking_code": b.booking_code,
                 "customer_name": b.customer_name,
                 "package_title": b.package.marketing_title or str(b.package),
-                "room_number": b.room.room_number,
+                "room_number": ", ".join(
+                    br.room.room_number for br in b.rooms.all()
+                ),
                 "status": b.status,
                 "total_amount": b.total_amount,
                 "paid_amount": b.paid_amount,
                 "due_amount": b.due_amount,
                 "created_at": b.created_at,
             }
-            for b in Booking.objects.select_related("package", "room")
+            for b in Booking.objects.select_related("package")
+            .prefetch_related("rooms__room")
             .order_by("-created_at")[:8]
         ]
 

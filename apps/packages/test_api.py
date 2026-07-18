@@ -6,7 +6,7 @@ from rest_framework.test import APITestCase
 
 from apps.bookings.models import Booking
 from apps.ships.models import Room, RoomType, Ship
-from apps.testing import ThrottlelessTestMixin
+from apps.testing import ThrottlelessTestMixin, create_booking
 
 from .models import KidPricingRule, Package, PackageRoom
 
@@ -72,15 +72,15 @@ class PackageApiTestCase(ThrottlelessTestMixin, APITestCase):
         )
 
     def make_booking(self, room, status=Booking.Status.PENDING):
-        return Booking.objects.create(
+        booking = create_booking(
+            self.package,
+            rooms=[{"room": room, "adult_count": 2, "kid_details": []}],
             customer_name="Rahim",
-            phone="01700000000",
-            email="rahim@example.com",
-            package=self.package,
-            room=room,
-            adult_count=2,
-            status=status,
         )
+        if status != Booking.Status.PENDING:
+            booking.status = status
+            booking.save()
+        return booking
 
 
 class PackageListApiTests(PackageApiTestCase):

@@ -19,9 +19,9 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
-from apps.bookings.models import Booking, Payment
+from apps.bookings.models import Booking, BookingRoom, Payment
 from apps.bookings.test_api import build_fixtures
-from apps.testing import ThrottlelessTestMixin, sign_ipn
+from apps.testing import ThrottlelessTestMixin, create_booking, sign_ipn
 
 GATEWAY_URL = "https://sandbox.sslcommerz.com/gwprocess/testsession"
 
@@ -42,17 +42,11 @@ class PaymentQABase(ThrottlelessTestMixin, APITestCase):
         )
 
     def make_booking(self, room=None, adults=2):
-        b = Booking(
-            customer_name="Rahim Uddin",
-            phone="01700000000",
-            email="rahim@example.com",
-            package=self.package,
-            room=room or self.room_4p,
-            adult_count=adults,
+        # 4P/2 adults -> 3500 + 2*3000 = 9500.00 (min deposit 4750)
+        return create_booking(
+            self.package,
+            rooms=[{"room": room or self.room_4p, "adult_count": adults, "kid_details": []}],
         )
-        b.full_clean()
-        b.save()
-        return b  # 4P/2 adults -> 3500 + 2*3000 = 9500.00 (min deposit 4750)
 
     def initiate(self, booking, payload):
         with patch(
@@ -694,8 +688,9 @@ class CancellationTests(PaymentQABase):
             "/api/bookings/",
             {
                 "package_id": self.package.pk,
-                "room_id": self.room_4p.pk,
-                "adult_count": 2,
+                "rooms": [
+                    {"room_id": self.room_4p.pk, "adult_count": 2, "kid_details": []}
+                ],
                 "customer_name": "New Guest",
                 "phone": "01800000000",
                 "email": "new@example.com",
@@ -808,8 +803,9 @@ class DueDeadlineTests(PaymentQABase):
             "/api/bookings/",
             {
                 "package_id": self.package.pk,
-                "room_id": self.room_4p.pk,
-                "adult_count": 2,
+                "rooms": [
+                    {"room_id": self.room_4p.pk, "adult_count": 2, "kid_details": []}
+                ],
                 "customer_name": "Standby Guest",
                 "phone": "01800000001",
                 "email": "standby@example.com",
@@ -919,8 +915,9 @@ class MoneyInFlightTests(PaymentQABase):
             "/api/bookings/",
             {
                 "package_id": self.package.pk,
-                "room_id": self.room_4p.pk,
-                "adult_count": 2,
+                "rooms": [
+                    {"room_id": self.room_4p.pk, "adult_count": 2, "kid_details": []}
+                ],
                 "customer_name": "Second Guest",
                 "phone": "01800000000",
                 "email": "second@example.com",
@@ -937,7 +934,9 @@ class MoneyInFlightTests(PaymentQABase):
         self.assertEqual(b.paid_amount, Decimal("5000.00"))
         self.assertEqual(b.status, Booking.Status.PARTIALLY_PAID)
         self.assertEqual(
-            Booking.objects.filter(package=self.package, room=self.room_4p).count(),
+            BookingRoom.objects.filter(
+                package=self.package, room=self.room_4p
+            ).count(),
             1,  # exactly one booking for the room — never double-sold
         )
 

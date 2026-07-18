@@ -11,18 +11,20 @@ from apps.packages.models import KidPricingRule, Package, PackageRoom
 from apps.ships.models import Room, RoomType, Ship
 from apps.testing import ThrottlelessTestMixin
 
-from .models import Booking
+from .models import Booking, BookingRoom
 
 BOOKING_PUBLIC_FIELDS = {
     "booking_code",
     "status",
     "package",
-    "room_number",
+    # A booking may hold several cabins now — the per-room detail (number, type,
+    # that room's pax) lives in this list; adult_count/kid_details are no longer
+    # top-level.
+    "rooms",
+    "total_pax",
     "customer_name",
     "phone",
     "email",
-    "adult_count",
-    "kid_details",
     "special_requests",
     "total_amount",
     "paid_amount",
@@ -83,14 +85,28 @@ class BookingApiTestCase(ThrottlelessTestMixin, APITestCase):
         ) = build_fixtures()
 
     def payload(self, **overrides):
+        """A one-room booking payload in the new rooms=[…] shape.
+
+        For convenience the legacy flat keys (room_id / adult_count /
+        kid_details) are still accepted as overrides and folded into that single
+        room, so existing single-room tests read unchanged. Pass rooms=[…]
+        explicitly to build a multi-room booking.
+        """
+        room_id = overrides.pop("room_id", self.room_4p.id)
+        adult_count = overrides.pop("adult_count", 2)
+        kid_details = overrides.pop("kid_details", [{"age": 2}, {"age": 5}])
         data = {
             "package_id": self.package.id,
-            "room_id": self.room_4p.id,
             "customer_name": "Rahim Uddin",
             "phone": "01700000000",
             "email": "rahim@example.com",
-            "adult_count": 2,
-            "kid_details": [{"age": 2}, {"age": 5}],
+            "rooms": [
+                {
+                    "room_id": room_id,
+                    "adult_count": adult_count,
+                    "kid_details": kid_details,
+                }
+            ],
         }
         data.update(overrides)
         return data
@@ -102,15 +118,30 @@ class QuoteApiTests(BookingApiTestCase):
         self.assertEqual(response.status_code, 200)
         data = response.data
         # 3500 base + 2×3000 adults + 0 (age 2) + 1500 (age 5) = 11000
-        self.assertEqual(data["total"], "11000.00")
-        self.assertEqual(data["room_base"], "3500.00")
-        self.assertEqual(data["adults_subtotal"], "6000.00")
-        self.assertEqual(data["kids_subtotal"], "1500.00")
+        self.assertEqual(data["grand_total"], "11000.00")
+        room = data["rooms"][0]
+        self.assertEqual(room["total"], "11000.00")
+        self.assertEqual(room["room_base"], "3500.00")
+        self.assertEqual(room["adults_subtotal"], "6000.00")
+        self.assertEqual(room["kids_subtotal"], "1500.00")
         self.assertEqual(
-            data["kids"],
+            room["kids"],
             [{"age": 2, "charge": "0.00"}, {"age": 5, "charge": "1500.00"}],
         )
+        self.assertEqual(room["room_number"], "T2")
         self.assertEqual(Booking.objects.count(), 0)
+
+    def test_quote_multi_room_sums_grand_total(self):
+        # Two cabins in one quote: 11000 (T2, 4-person) + 8000 (T1, 2-person:
+        # 2000 base + 2×3000 adults) = 19000.
+        payload = self.payload()
+        payload["rooms"].append(
+            {"room_id": self.room_2p.id, "adult_count": 2, "kid_details": []}
+        )
+        response = self.client.post("/api/bookings/quote/", payload, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["rooms"]), 2)
+        self.assertEqual(response.data["grand_total"], "19000.00")
 
     def test_quote_validates_like_create(self):
         response = self.client.post(
@@ -119,7 +150,8 @@ class QuoteApiTests(BookingApiTestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn("adult_count", response.data)
+        # Per-room errors are nested under rooms[<index>].
+        self.assertIn("rooms", response.data)
 
 
 class BookingCreateApiTests(BookingApiTestCase):
@@ -131,13 +163,40 @@ class BookingCreateApiTests(BookingApiTestCase):
         self.assertEqual(data["total_amount"], "11000.00")
         self.assertEqual(data["paid_amount"], "0.00")
         self.assertEqual(data["due_amount"], "11000.00")
-        self.assertEqual(data["room_number"], "T2")
-        self.assertEqual(data["price_breakdown"]["total"], "11000.00")
+        self.assertEqual(len(data["rooms"]), 1)
+        self.assertEqual(data["rooms"][0]["room_number"], "T2")
+        self.assertEqual(data["price_breakdown"]["grand_total"], "11000.00")
 
         booking = Booking.objects.get(booking_code=data["booking_code"])
         self.assertEqual(booking.status, Booking.Status.PENDING)
         self.assertEqual(booking.total_amount, Decimal("11000.00"))
+        self.assertEqual(booking.rooms.count(), 1)
         self.assertEqual(booking.status_logs.count(), 1)
+
+    def test_create_multi_room_booking(self):
+        # A family taking both cabins in one booking: one booking, one total.
+        payload = self.payload()
+        payload["rooms"].append(
+            {"room_id": self.room_2p.id, "adult_count": 2, "kid_details": []}
+        )
+        response = self.client.post("/api/bookings/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        data = response.data
+        self.assertEqual(data["total_amount"], "19000.00")  # 11000 + 8000
+        self.assertEqual(len(data["rooms"]), 2)
+        self.assertEqual(data["price_breakdown"]["grand_total"], "19000.00")
+        booking = Booking.objects.get(booking_code=data["booking_code"])
+        self.assertEqual(booking.rooms.count(), 2)
+        self.assertEqual(booking.total_amount, Decimal("19000.00"))
+
+    def test_duplicate_room_in_one_booking_rejected(self):
+        payload = self.payload()
+        payload["rooms"].append(
+            {"room_id": self.room_4p.id, "adult_count": 1, "kid_details": []}
+        )
+        response = self.client.post("/api/bookings/", payload, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("rooms", response.data)
 
     def test_client_submitted_amounts_ignored(self):
         payload = self.payload()
@@ -161,6 +220,25 @@ class BookingCreateApiTests(BookingApiTestCase):
 
 
 class BookingValidationApiTests(BookingApiTestCase):
+    def _room_errors(self, response):
+        """The per-room validation errors, whatever shape DRF nested them in.
+
+        Serializer raises {"rooms": {<index>: {...}}}; field-level (min_value,
+        malformed kid) errors from the nested BookingRoomInputSerializer land as
+        {"rooms": [{...}]}. Flatten both to one dict of field → messages."""
+        rooms_err = response.data["rooms"]
+        if isinstance(rooms_err, dict):  # cross-field {index: {...}}
+            merged = {}
+            for per_room in rooms_err.values():
+                merged.update(per_room)
+            return merged
+        # list form: one dict per room, {} for the clean ones
+        merged = {}
+        for per_room in rooms_err:
+            if per_room:
+                merged.update(per_room)
+        return merged
+
     def test_pax_limit_rejected(self):
         response = self.client.post(
             "/api/bookings/",
@@ -168,7 +246,7 @@ class BookingValidationApiTests(BookingApiTestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn("adult_count", response.data)
+        self.assertIn("adult_count", self._room_errors(response))
 
     def test_too_many_kids_rejected(self):
         response = self.client.post(
@@ -181,21 +259,21 @@ class BookingValidationApiTests(BookingApiTestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn("kid_details", response.data)
+        self.assertIn("kid_details", self._room_errors(response))
 
     def test_negative_age_rejected(self):
         response = self.client.post(
             "/api/bookings/", self.payload(kid_details=[{"age": -1}]), format="json"
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn("kid_details", response.data)
+        self.assertIn("rooms", response.data)
 
     def test_zero_adults_rejected(self):
         response = self.client.post(
             "/api/bookings/", self.payload(adult_count=0), format="json"
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn("adult_count", response.data)
+        self.assertIn("rooms", response.data)
 
     def test_cutoff_passed_rejected(self):
         self.package.booking_cutoff_datetime = timezone.now() - timezone.timedelta(
@@ -221,7 +299,7 @@ class BookingValidationApiTests(BookingApiTestCase):
             "/api/bookings/", self.payload(room_id=stray.id), format="json"
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn("room_id", response.data)
+        self.assertIn("rooms", response.data)
 
     def test_admin_withheld_room_conflict(self):
         PackageRoom.objects.filter(package=self.package, room=self.room_4p).update(
@@ -273,12 +351,16 @@ class ConcurrentBookingRaceTests(ThrottlelessTestMixin, TransactionTestCase):
                     "/api/bookings/",
                     {
                         "package_id": self.package.id,
-                        "room_id": self.room.id,
                         "customer_name": name,
                         "phone": "01700000000",
                         "email": "race@example.com",
-                        "adult_count": 1,
-                        "kid_details": [],
+                        "rooms": [
+                            {
+                                "room_id": self.room.id,
+                                "adult_count": 1,
+                                "kid_details": [],
+                            }
+                        ],
                     },
                     format="json",
                 )
@@ -296,5 +378,8 @@ class ConcurrentBookingRaceTests(ThrottlelessTestMixin, TransactionTestCase):
 
         self.assertEqual(sorted(results), [201, 409])
         self.assertEqual(
-            Booking.objects.filter(package=self.package, room=self.room).count(), 1
+            BookingRoom.objects.filter(
+                package=self.package, room=self.room, is_active=True
+            ).count(),
+            1,
         )

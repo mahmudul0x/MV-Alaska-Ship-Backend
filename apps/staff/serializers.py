@@ -13,7 +13,13 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from apps.bookings.exceptions import RoomUnavailable
-from apps.bookings.models import Booking, BookingStatusLog, Invoice, Payment
+from apps.bookings.models import (
+    Booking,
+    BookingRoom,
+    BookingStatusLog,
+    Invoice,
+    Payment,
+)
 from apps.bookings.serializers import BookingCreateSerializer
 from apps.packages.models import KidPricingRule, Package, PackageRoom
 from apps.ships.models import (
@@ -278,22 +284,54 @@ class StaffFoodMenuItemSerializer(serializers.ModelSerializer):
 
 class StaffPackageRoomBookingSerializer(serializers.ModelSerializer):
     """Booking summary embedded in the per-package room map — enough for the
-    dashboard to show who holds a room and what they owe."""
+    dashboard to show who holds THIS room and what the booking owes.
 
-    total_pax = serializers.IntegerField(read_only=True)
+    Serialised from a BookingRoom: adult_count/kid_details are this cabin's own
+    party, while money/customer/status come from its parent booking (the family
+    pays once for the whole booking, whatever rooms it holds)."""
+
+    id = serializers.IntegerField(source="booking.id", read_only=True)
+    booking_code = serializers.CharField(
+        source="booking.booking_code", read_only=True
+    )
+    customer_name = serializers.CharField(
+        source="booking.customer_name", read_only=True
+    )
+    phone = serializers.CharField(source="booking.phone", read_only=True)
+    # This room's pax (BookingRoom fields).
+    room_pax = serializers.IntegerField(source="total_pax", read_only=True)
+    # The whole booking's pax across all its rooms.
+    total_pax = serializers.SerializerMethodField()
+    total_amount = serializers.DecimalField(
+        source="booking.total_amount", max_digits=12, decimal_places=2,
+        read_only=True,
+    )
+    paid_amount = serializers.DecimalField(
+        source="booking.paid_amount", max_digits=12, decimal_places=2,
+        read_only=True,
+    )
+    due_amount = serializers.DecimalField(
+        source="booking.due_amount", max_digits=12, decimal_places=2,
+        read_only=True,
+    )
+    status = serializers.CharField(source="booking.status", read_only=True)
 
     class Meta:
-        model = Booking
+        model = BookingRoom
         fields = [
             "id", "booking_code", "customer_name", "phone",
-            "adult_count", "kid_details", "total_pax",
+            "adult_count", "kid_details", "room_pax", "total_pax",
             "total_amount", "paid_amount", "due_amount", "status",
         ]
+
+    def get_total_pax(self, booking_room):
+        return booking_room.booking.total_pax
 
 
 class StaffPackageRoomSerializer(serializers.ModelSerializer):
     """One room within a package with its live status and (if booked) the
-    active booking. Expects `bookings_by_room` {room_id: Booking} in context."""
+    active booking. Expects `bookings_by_room` {room_id: BookingRoom} in
+    context."""
 
     room_id = serializers.IntegerField(source="room.id", read_only=True)
     room_number = serializers.CharField(source="room.room_number", read_only=True)
@@ -535,23 +573,44 @@ class StaffStatusLogSerializer(serializers.ModelSerializer):
         fields = ["old_status", "new_status", "changed_by_username", "created_at"]
 
 
+class StaffBookingRoomSerializer(serializers.ModelSerializer):
+    """One cabin of a booking in the staff booking list/detail."""
+
+    room = serializers.IntegerField(source="room_id", read_only=True)
+    room_number = serializers.CharField(source="room.room_number", read_only=True)
+    room_type = serializers.CharField(source="room.room_type.name", read_only=True)
+
+    class Meta:
+        model = BookingRoom
+        fields = [
+            "room", "room_number", "room_type", "adult_count", "kid_details",
+            "room_subtotal", "is_active",
+        ]
+
+
 class StaffBookingListSerializer(serializers.ModelSerializer):
     package_title = serializers.SerializerMethodField()
-    room_number = serializers.CharField(source="room.room_number", read_only=True)
+    rooms = StaffBookingRoomSerializer(many=True, read_only=True)
+    # Comma-joined room numbers for compact list/table columns that want a
+    # single string (the dashboard's booking list showed one room_number).
+    room_number = serializers.SerializerMethodField()
     total_pax = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Booking
         fields = [
             "id", "booking_code", "customer_name", "phone", "email",
-            "package", "package_title", "room", "room_number",
-            "adult_count", "kid_details", "total_pax", "special_requests",
+            "package", "package_title", "rooms", "room_number",
+            "total_pax", "special_requests",
             "total_amount", "paid_amount", "due_amount", "status",
             "refund_required", "refund_note", "created_at",
         ]
 
     def get_package_title(self, booking):
         return booking.package.marketing_title or str(booking.package)
+
+    def get_room_number(self, booking):
+        return ", ".join(br.room.room_number for br in booking.rooms.all())
 
 
 class StaffBookingDetailSerializer(StaffBookingListSerializer):
@@ -582,9 +641,10 @@ class StaffBookingUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        # Un-cancelling re-occupies the room — reject cleanly if it was
-        # resold in the meantime, instead of letting the partial unique
-        # index (package, room, not-cancelled) 500 on the UPDATE.
+        # Un-cancelling re-occupies EVERY room the booking held — reject cleanly
+        # if any of them was resold in the meantime, instead of letting the
+        # partial unique constraint on BookingRoom (package, room, is_active)
+        # 500 on the re-activation UPDATE.
         new_status = attrs.get("status")
         if (
             new_status
@@ -592,22 +652,26 @@ class StaffBookingUpdateSerializer(serializers.ModelSerializer):
             and self.instance
             and self.instance.status == Booking.Status.CANCELLED
         ):
+            held_room_ids = list(
+                self.instance.rooms.values_list("room_id", flat=True)
+            )
             conflict = (
-                Booking.objects.filter(
+                BookingRoom.objects.filter(
                     package_id=self.instance.package_id,
-                    room_id=self.instance.room_id,
+                    room_id__in=held_room_ids,
+                    is_active=True,
                 )
-                .exclude(status=Booking.Status.CANCELLED)
-                .exclude(pk=self.instance.pk)
+                .exclude(booking_id=self.instance.pk)
+                .select_related("room", "booking")
                 .first()
             )
             if conflict:
                 raise serializers.ValidationError(
                     {
                         "status": (
-                            f"Room {self.instance.room.room_number} is already "
-                            f"held by {conflict.booking_code} on this package — "
-                            "this booking cannot be reactivated."
+                            f"Room {conflict.room.room_number} is already "
+                            f"held by {conflict.booking.booking_code} on this "
+                            "package — this booking cannot be reactivated."
                         )
                     }
                 )

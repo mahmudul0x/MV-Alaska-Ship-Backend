@@ -33,6 +33,20 @@ logger = logging.getLogger(__name__)
 
 FONTS_DIR = settings.BASE_DIR / "assets" / "fonts"
 
+
+def booking_rooms(booking):
+    """The booking's rooms, ordered by cabin number — the single place every
+    invoice/email helper iterates rooms, so they stay in one consistent order."""
+    return list(
+        booking.rooms.select_related("room__room_type").order_by("room__room_number")
+    )
+
+
+def rooms_label(booking):
+    """Comma-joined room numbers, e.g. "201, 202, 305" — for one-line summaries
+    (email subject-ish lines, cancellation notice) where a table is overkill."""
+    return ", ".join(br.room.room_number for br in booking_rooms(booking))
+
 #: Booking states an invoice may be issued for. An invoice attests to money
 #: received: a booking with nothing paid has nothing to attest to, and a
 #: cancelled booking's money is owed back, not collected (QA M3).
@@ -118,7 +132,7 @@ def send_invoice_email(invoice):
         f"Thank you for your payment. Your invoice is attached.\n\n"
         f"Invoice: {invoice.number}\n"
         f"Booking: {booking.booking_code}\n"
-        f"Room: {booking.room.room_number}\n"
+        f"Room(s): {rooms_label(booking)}\n"
         f"Total: {invoice.total_amount} BDT\n"
         f"Paid: {invoice.paid_amount} BDT\n"
         f"Due: {invoice.due_amount} BDT"
@@ -152,17 +166,23 @@ def _invoice_email_html(invoice):
 
     label = 'style="padding:9px 0;color:#69737d;font-size:13px;width:38%;"'
     value = 'style="padding:9px 0;color:#28323c;font-size:13px;font-weight:bold;"'
+    rows = booking_rooms(booking)
+    detail_pairs = [
+        ("Booking code", booking.booking_code),
+        ("Tour dates", f"{package.start_date:%d %b %Y} – {package.end_date:%d %b %Y}"),
+    ]
+    # One "Room N" row per cabin, each with its own party — a family taking
+    # several cabins sees each one and its guests spelled out.
+    for i, br in enumerate(rows, start=1):
+        room_label = "Room" if len(rows) == 1 else f"Room {i}"
+        detail_pairs.append(
+            (room_label, f"{br.room.room_number} ({br.room.room_type.name}) — "
+                         f"{br.adult_count} adult(s), {len(br.kid_details)} kid(s)")
+        )
     details = "".join(
         f'<tr style="border-bottom:1px solid #eef1f5;">'
         f"<td {label}>{escape(k)}</td><td {value}>{escape(str(v))}</td></tr>"
-        for k, v in [
-            ("Booking code", booking.booking_code),
-            ("Room", f"{booking.room.room_number} ({booking.room.room_type.name})"),
-            ("Tour dates",
-             f"{package.start_date:%d %b %Y} – {package.end_date:%d %b %Y}"),
-            ("Guests",
-             f"{booking.adult_count} adult(s), {len(booking.kid_details)} kid(s)"),
-        ]
+        for k, v in detail_pairs
     )
 
     amount = 'style="padding:7px 14px;font-size:13px;text-align:right;color:#28323c;"'
@@ -289,10 +309,11 @@ def send_cancellation_email(booking):
         ship_name = package.ship.name
         paid = booking.paid_amount
         subject = f"{ship_name} — booking {booking.booking_code} has been cancelled"
+        rooms = rooms_label(booking)
         body = (
             f"Dear {booking.customer_name},\n\n"
-            f"Your booking {booking.booking_code} (room "
-            f"{booking.room.room_number}) for the "
+            f"Your booking {booking.booking_code} (room(s) "
+            f"{rooms}) for the "
             f"{package.start_date:%d %b %Y} tour has been cancelled.\n\n"
         )
         if paid > 0:
@@ -450,10 +471,13 @@ def generate_invoice_pdf(invoice):
     booking = invoice.booking
     package = booking.package
 
+    rooms = booking_rooms(booking)
+
     # Any character we cannot draw is replaced by a visible marker rather than
     # vanishing. Log it so staff can correct the record (QA H2).
     missing = uncovered_characters(
-        f"{booking.customer_name}{booking.email}{booking.room.room_number}"
+        f"{booking.customer_name}{booking.email}"
+        + "".join(br.room.room_number for br in rooms)
     )
     if missing:
         logger.warning(
@@ -570,18 +594,20 @@ def generate_invoice_pdf(invoice):
         ],
     )
     end_left = pdf.get_y()
-    info_block(
-        pdf.l_margin + col_w + 8,
-        "TRIP DETAILS",
-        [
-            ("Tour dates", f"{package.start_date:%d %b %Y} – {package.end_date:%d %b %Y}"),
-            ("Room", f"{booking.room.room_number} ({booking.room.room_type.name})"),
-            (
-                "Guests",
-                f"{booking.adult_count} adult(s), {len(booking.kid_details)} kid(s)",
-            ),
-        ],
-    )
+    trip_rows = [
+        ("Tour dates", f"{package.start_date:%d %b %Y} – {package.end_date:%d %b %Y}"),
+    ]
+    # One line per cabin: number (type) and that cabin's own party. For a single
+    # room this reads exactly as before ("Room" / "Guests"); a multi-room family
+    # gets "Room 1", "Room 2", … each with its guests.
+    for i, br in enumerate(rooms, start=1):
+        room_label = "Room" if len(rooms) == 1 else f"Room {i}"
+        trip_rows.append(
+            (room_label,
+             f"{br.room.room_number} ({br.room.room_type.name}), "
+             f"{br.adult_count} adult(s), {len(br.kid_details)} kid(s)")
+        )
+    info_block(pdf.l_margin + col_w + 8, "TRIP DETAILS", trip_rows)
     pdf.set_y(max(end_left, pdf.get_y()) + 6)
 
     # ── Table helpers ──────────────────────────────────────────────────────
@@ -613,23 +639,34 @@ def generate_invoice_pdf(invoice):
     # itemisation not summing to what was charged (QA M1).
     desc_w, amt_w = epw - 45, 45
     table_header("CHARGES", [("Description", desc_w, "L"), ("Amount (BDT)", amt_w, "R")])
-    breakdown = restore_breakdown(booking.price_snapshot)
-    if breakdown is None:
-        # Pre-snapshot booking (or a snapshot that never got written): the
-        # stored total is still the money truth, so show it as a single line
-        # rather than inventing an itemisation that may not add up.
-        rows = [("Package charges", invoice.total_amount)]
-    else:
-        rows = [
-            (f"Room {booking.room.room_number} — base price", breakdown["room_base"]),
-            (
-                f"Adult fare ({breakdown['adult_count']} × {breakdown['adult_price']})",
-                breakdown["adults_subtotal"],
-            ),
-        ] + [
-            (f"Kid fare (age {kid['age']})", kid["charge"]) for kid in breakdown["kids"]
-        ]
-    for i, (desc, amount) in enumerate(rows):
+    # Line items come from each room's frozen snapshot — never recomputed from
+    # today's (admin-editable) KidPricingRule / adult_price, which would re-price
+    # an already-paid booking (QA M1). Every cabin is grouped and itemised in
+    # turn; a single-room booking reads as one group, exactly as before.
+    charge_rows = []  # (desc, amount) pairs, in draw order
+    any_snapshot = False
+    for br in rooms:
+        breakdown = restore_breakdown(br.price_snapshot)
+        if breakdown is None:
+            continue
+        any_snapshot = True
+        charge_rows.append(
+            (f"Room {br.room.room_number} — base price", breakdown["room_base"])
+        )
+        charge_rows.append((
+            f"    Adult fare ({breakdown['adult_count']} × {breakdown['adult_price']})",
+            breakdown["adults_subtotal"],
+        ))
+        charge_rows.extend(
+            (f"    Kid fare (age {kid['age']})", kid["charge"])
+            for kid in breakdown["kids"]
+        )
+    if not any_snapshot:
+        # Pre-snapshot booking (or snapshots that never got written): the stored
+        # total is still the money truth, so show it as a single line rather
+        # than inventing an itemisation that may not add up.
+        charge_rows = [("Package charges", invoice.total_amount)]
+    for i, (desc, amount) in enumerate(charge_rows):
         table_row([(desc, desc_w, "L"), (f"{amount}", amt_w, "R")], shade=i % 2 == 0)
     pdf.ln(5)
 

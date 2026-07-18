@@ -42,13 +42,11 @@ class Booking(models.Model):
     package = models.ForeignKey(
         Package, on_delete=models.PROTECT, related_name="bookings"
     )
-    room = models.ForeignKey(Room, on_delete=models.PROTECT, related_name="bookings")
-    adult_count = models.PositiveSmallIntegerField()
-    kid_details = models.JSONField(
-        default=list,
-        blank=True,
-        help_text='List of kids as [{"age": 5}, ...]. Ages drive kid pricing.',
-    )
+    # Per-room occupancy (room, adult_count, kid_details) used to live here, one
+    # room per booking. A family that needs 2–3 cabins is one booking with one
+    # payment and one invoice, so the rooms moved to the BookingRoom child table
+    # (each row its own room + pax + priced subtotal). Booking keeps only the
+    # party-wide fields: customer, the single money truth, and status.
     # Customer's free-text note captured in the booking wizard (dietary needs,
     # accessibility, anniversary, etc.). Optional; surfaced to staff and the
     # guide. Length is bounded at the serializer (1000 chars) — this is the
@@ -106,12 +104,9 @@ class Booking(models.Model):
             ),
         ]
         constraints = [
-            # One active booking per room per package (cancelled frees the room).
-            models.UniqueConstraint(
-                fields=["package", "room"],
-                condition=~Q(status="cancelled"),
-                name="uniq_active_booking_per_package_room",
-            ),
+            # One active booking per (package, room) is now enforced on
+            # BookingRoom (a booking may hold several rooms). See
+            # BookingRoom.Meta.constraints.
             # No code path may ever persist a negative due — overpayment must
             # be rejected upstream (public and staff APIs both enforce the
             # ceiling; this is the backstop for future/raw ORM paths).
@@ -125,69 +120,43 @@ class Booking(models.Model):
         return f"{self.booking_code} — {self.customer_name}"
 
     @property
-    def kid_ages(self):
-        return [kid["age"] for kid in self.kid_details]
-
-    @property
     def total_pax(self):
-        return self.adult_count + len(self.kid_details)
+        return sum(br.total_pax for br in self.rooms.all())
+
+    def reprice(self):
+        """Recompute total_amount + price_snapshot from the booking's rooms.
+
+        Server-side pricing — client-submitted amounts are never trusted. Each
+        BookingRoom already carries its own frozen room_subtotal + per-room
+        price_snapshot (set in BookingRoom.clean()); the booking total is their
+        sum and the booking snapshot is the list of per-room snapshots, so the
+        invoice can itemise every cabin.
+
+        A booking is priced at creation and re-priced only while NO money has
+        been quoted to the gateway against it. Pricing inputs (adult_price,
+        base_price, KidPricingRule) are admin-editable by design, so a later
+        re-price would rewrite what a paying customer owes. paid_amount > 0 is
+        not a sufficient guard: a live PENDING session is money in flight while
+        paid_amount is still 0.00, and re-pricing then means the customer is
+        charged the amount they authorised but credited against a different
+        total — or, if the price DROPPED, due goes negative and the
+        non-negative CheckConstraint 500s the IPN and strands their money
+        (QA C7). So any payment that is PENDING or SUCCESS freezes the price.
+        """
+        if self.paid_amount > 0 or self._has_money_in_flight():
+            return
+        rooms = list(self.rooms.all())
+        self.total_amount = sum(
+            (br.room_subtotal for br in rooms), Decimal("0.00")
+        )
+        self.price_snapshot = {"rooms": [br.price_snapshot for br in rooms]}
 
     def clean(self):
-        if not self.package_id or not self.room_id:
-            return  # field-level "required" errors already cover these
-
-        errors = {}
-        room_type = self.room.room_type
-
-        if self.adult_count is not None:
-            if self.adult_count < 1:
-                errors["adult_count"] = "At least one adult is required."
-            elif self.adult_count > room_type.max_adults:
-                errors["adult_count"] = (
-                    f"{room_type.name} allows at most {room_type.max_adults} adults."
-                )
-
-        if not isinstance(self.kid_details, list) or not all(
-            isinstance(kid, dict) and isinstance(kid.get("age"), int) and kid["age"] >= 0
-            for kid in self.kid_details
-        ):
-            errors["kid_details"] = (
-                'kid_details must be a list like [{"age": 5}] with non-negative '
-                "integer ages."
-            )
-        elif len(self.kid_details) > room_type.max_kids:
-            errors["kid_details"] = (
-                f"{room_type.name} allows at most {room_type.max_kids} kids."
-            )
-
-        if not PackageRoom.objects.filter(
-            package_id=self.package_id, room_id=self.room_id, is_available=True
-        ).exists():
-            errors["room"] = "This room is not available in the selected package."
-
-        if errors:
-            raise ValidationError(errors)
-
-        # Server-side pricing — client-submitted amounts are never trusted.
-        # Price once and keep BOTH outputs: the total (money) and the frozen
-        # itemisation that explains it.
-        #
-        # A booking is priced at creation and re-priced only while NO money has
-        # been quoted to the gateway against it. Pricing inputs (adult_price,
-        # base_price, KidPricingRule) are admin-editable by design, so a later
-        # re-price would rewrite what a paying customer owes. paid_amount > 0 is
-        # not a sufficient guard: a live PENDING session is money in flight
-        # while paid_amount is still 0.00, and re-pricing then means the
-        # customer is charged the amount they authorised but credited against a
-        # different total — or, if the price DROPPED, due goes negative and the
-        # non-negative CheckConstraint 500s the IPN and strands their money
-        # (QA C7). So any payment that is PENDING or SUCCESS freezes the price.
-        if self.paid_amount <= 0 and not self._has_money_in_flight():
-            breakdown = price_breakdown(
-                room_type, self.package, self.adult_count, self.kid_ages
-            )
-            self.total_amount = breakdown["total"]
-            self.price_snapshot = snapshot_breakdown(breakdown)
+        # Per-room pax limits, availability and pricing now live on
+        # BookingRoom.clean(); the booking-wide total is assembled by reprice()
+        # once its rooms exist. Booking-level validation (cutoff) is enforced at
+        # the serializer.
+        pass
 
     def _has_money_in_flight(self):
         """True if any gateway session has been handed out for this booking —
@@ -271,6 +240,18 @@ class Booking(models.Model):
         super().save(*args, **kwargs)
 
         if old_status != self.status:
+            # BookingRoom.is_active mirrors "the booking still holds this
+            # room" — it is what the partial unique constraint and the public
+            # availability query key on. Cancelling releases every room;
+            # reactivating (e.g. staff un-cancel) re-holds them. The re-hold is
+            # what the partial unique constraint on BookingRoom guards: if
+            # another booking took the room meanwhile, this UPDATE raises and
+            # the un-cancel is rejected (mirrors the old Booking-level guard).
+            if self.status == self.Status.CANCELLED:
+                self.rooms.filter(is_active=True).update(is_active=False)
+            elif old_status == self.Status.CANCELLED:
+                self.rooms.filter(is_active=False).update(is_active=True)
+
             BookingStatusLog.objects.create(
                 booking=self,
                 old_status=old_status or "",
@@ -328,6 +309,135 @@ class Booking(models.Model):
             self.paid_amount = booking.paid_amount
             self.due_amount = booking.due_amount
             self.status = booking.status
+
+
+class BookingRoom(models.Model):
+    """One cabin within a booking: its room, that room's own party (adults +
+    kids), and the priced subtotal for it.
+
+    A booking may hold several rooms (a big family taking 2–3 cabins), each with
+    its own pax and its own room-type limits. Money stays booking-wide: the
+    booking's total_amount is the sum of every room_subtotal here, and there is
+    one payment and one invoice for the whole booking.
+    """
+
+    booking = models.ForeignKey(
+        Booking, on_delete=models.CASCADE, related_name="rooms"
+    )
+    room = models.ForeignKey(
+        Room, on_delete=models.PROTECT, related_name="booking_rooms"
+    )
+    # Denormalised from booking.package so the "one active booking per
+    # (package, room)" rule can be a DB-level partial unique constraint —
+    # constraints cannot span a relation (booking__package), so the package is
+    # copied onto the row. Kept in sync in save().
+    package = models.ForeignKey(
+        Package, on_delete=models.PROTECT, related_name="booking_rooms"
+    )
+    adult_count = models.PositiveSmallIntegerField()
+    kid_details = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of kids as [{"age": 5}, ...]. Ages drive kid pricing.',
+    )
+    # Frozen priced subtotal for THIS room and its per-room itemisation, taken
+    # when the room is priced (same freeze rules as the booking — see
+    # Booking.reprice()). The booking's total_amount sums these; the invoice
+    # itemises each room from its own price_snapshot.
+    room_subtotal = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0.00")
+    )
+    price_snapshot = models.JSONField(default=dict, blank=True)
+    # Mirrors "the booking still holds this room". Set False when the booking is
+    # cancelled (Booking.save()), which frees the room for resale; the partial
+    # unique constraint and the public availability query both key on it.
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["room__room_number"]
+        constraints = [
+            # One active hold per (package, room): a cancelled booking's rooms
+            # go is_active=False and free the cabin. Replaces the old
+            # Booking-level uniq_active_booking_per_package_room.
+            models.UniqueConstraint(
+                fields=["package", "room"],
+                condition=Q(is_active=True),
+                name="uniq_active_bookingroom_per_package_room",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.booking.booking_code} — Room {self.room.room_number}"
+
+    @property
+    def kid_ages(self):
+        return [kid["age"] for kid in self.kid_details]
+
+    @property
+    def total_pax(self):
+        return self.adult_count + len(self.kid_details)
+
+    def clean(self):
+        if not self.room_id:
+            return  # field-level "required" error already covers this
+        # package is copied from the booking; it must be present to validate
+        # availability and to price against the package's adult_price.
+        package = self.package or (self.booking.package if self.booking_id else None)
+        if package is None:
+            return
+
+        errors = {}
+        room_type = self.room.room_type
+
+        if self.adult_count is not None:
+            if self.adult_count < 1:
+                errors["adult_count"] = "At least one adult is required."
+            elif self.adult_count > room_type.max_adults:
+                errors["adult_count"] = (
+                    f"{room_type.name} allows at most {room_type.max_adults} adults."
+                )
+
+        if not isinstance(self.kid_details, list) or not all(
+            isinstance(kid, dict) and isinstance(kid.get("age"), int) and kid["age"] >= 0
+            for kid in self.kid_details
+        ):
+            errors["kid_details"] = (
+                'kid_details must be a list like [{"age": 5}] with non-negative '
+                "integer ages."
+            )
+        elif len(self.kid_details) > room_type.max_kids:
+            errors["kid_details"] = (
+                f"{room_type.name} allows at most {room_type.max_kids} kids."
+            )
+
+        if not PackageRoom.objects.filter(
+            package=package, room_id=self.room_id, is_available=True
+        ).exists():
+            errors["room"] = "This room is not available in the selected package."
+
+        if errors:
+            raise ValidationError(errors)
+
+        # Server-side pricing for this room — client amounts are never trusted.
+        # The freeze guard lives on the booking (Booking.reprice): once money is
+        # quoted the whole booking's pricing is frozen, so a room is only priced
+        # here while its booking is still repriceable.
+        if not self.booking_id or (
+            self.booking.paid_amount <= 0 and not self.booking._has_money_in_flight()
+        ):
+            breakdown = price_breakdown(
+                room_type, package, self.adult_count, self.kid_ages
+            )
+            self.room_subtotal = breakdown["total"]
+            self.price_snapshot = snapshot_breakdown(
+                breakdown, room_number=self.room.room_number
+            )
+
+    def save(self, *args, **kwargs):
+        # Keep the denormalised package in step with the booking it belongs to.
+        if self.booking_id and self.package_id != self.booking.package_id:
+            self.package_id = self.booking.package_id
+        super().save(*args, **kwargs)
 
 
 class BookingStatusLog(models.Model):

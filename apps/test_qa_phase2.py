@@ -23,13 +23,13 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
 from apps.bookings.management.commands.expire_stale_bookings import expire_booking
-from apps.bookings.models import Booking, Payment
+from apps.bookings.models import Booking, BookingRoom, Payment
 from apps.bookings.serializers import PaymentInitiateSerializer
 from apps.bookings import payment_service
 from apps.bookings.test_api import build_fixtures
 from apps.packages.models import PackageRoom
 from apps.ships.models import Room
-from apps.testing import ThrottlelessTestMixin, sign_ipn
+from apps.testing import ThrottlelessTestMixin, create_booking, sign_ipn
 
 GATEWAY_URL = "https://sandbox.sslcommerz.com/gwprocess/qa-phase2"
 
@@ -37,12 +37,10 @@ GATEWAY_URL = "https://sandbox.sslcommerz.com/gwprocess/qa-phase2"
 def booking_payload(package, room, name="Racer", email="race@example.com"):
     return {
         "package_id": package.id,
-        "room_id": room.id,
         "customer_name": name,
         "phone": "01700000000",
         "email": email,
-        "adult_count": 1,
-        "kid_details": [],
+        "rooms": [{"room_id": room.id, "adult_count": 1, "kid_details": []}],
     }
 
 
@@ -86,8 +84,10 @@ class ConcurrencyTestCase(ThrottlelessTestMixin, TransactionTestCase):
         return results
 
     def active_bookings(self, room):
-        return Booking.objects.filter(package=self.package, room=room).exclude(
-            status=Booking.Status.CANCELLED
+        # A room's active holds now live on BookingRoom (is_active mirrors "still
+        # held"), one per active booking.
+        return BookingRoom.objects.filter(
+            package=self.package, room=room, is_active=True
         )
 
 
@@ -112,7 +112,7 @@ class EightWaySameRoomRaceTests(ConcurrencyTestCase):
         self.assertEqual(self.active_bookings(self.room_4p).count(), 1)
         # and zero duplicate active rows anywhere in the table
         dupes = (
-            Booking.objects.exclude(status=Booking.Status.CANCELLED)
+            BookingRoom.objects.filter(is_active=True)
             .values("package_id", "room_id")
             .annotate(n=Count("id"))
             .filter(n__gt=1)
@@ -134,17 +134,13 @@ class LastRoomOfTypeRaceTests(ConcurrencyTestCase):
             PackageRoom.objects.create(package=self.package, room=room)
             self.extra_rooms.append(room)
         for room in (self.room_2p, self.extra_rooms[0]):
-            booking = Booking(
+            create_booking(
+                self.package,
+                rooms=[{"room": room, "adult_count": 1, "kid_details": []}],
                 customer_name="Early Bird",
                 phone="01700000001",
                 email="early@example.com",
-                package=self.package,
-                room=room,
-                adult_count=1,
-                kid_details=[],
             )
-            booking.full_clean()
-            booking.save()
 
     def test_six_racers_for_the_last_room_one_winner(self):
         last_room = self.extra_rooms[1]
@@ -181,18 +177,13 @@ class HoldMechanismTests(ThrottlelessTestMixin, APITestCase):
         )
 
     def make_pending_booking(self, room=None):
-        booking = Booking(
+        return create_booking(
+            self.package,
+            rooms=[{"room": room or self.room_4p, "adult_count": 1, "kid_details": []}],
             customer_name="Holder",
             phone="01700000002",
             email="holder@example.com",
-            package=self.package,
-            room=room or self.room_4p,
-            adult_count=1,
-            kid_details=[],
         )
-        booking.full_clean()
-        booking.save()
-        return booking
 
     def backdate(self, booking, minutes):
         Booking.objects.filter(pk=booking.pk).update(
@@ -264,17 +255,13 @@ class ExpiryVsSettlementClobberTests(ThrottlelessTestMixin, TransactionTestCase)
         )
 
     def test_settlement_between_fetch_and_save_is_not_clobbered(self):
-        booking = Booking(
+        booking = create_booking(
+            self.package,
+            rooms=[{"room": self.room_4p, "adult_count": 1, "kid_details": []}],
             customer_name="Slow Payer",
             phone="01700000003",
             email="slow@example.com",
-            package=self.package,
-            room=self.room_4p,
-            adult_count=1,
-            kid_details=[],
         )
-        booking.full_clean()
-        booking.save()
         Booking.objects.filter(pk=booking.pk).update(
             created_at=timezone.now() - timedelta(minutes=45)
         )
@@ -316,17 +303,13 @@ class ExpiryVsSettlementClobberTests(ThrottlelessTestMixin, TransactionTestCase)
 
     def test_truly_stale_booking_still_expires_via_helper(self):
         """Control: the locked re-check does not stop legitimate expiry."""
-        booking = Booking(
+        booking = create_booking(
+            self.package,
+            rooms=[{"room": self.room_4p, "adult_count": 1, "kid_details": []}],
             customer_name="Abandoner",
             phone="01700000007",
             email="gone@example.com",
-            package=self.package,
-            room=self.room_4p,
-            adult_count=1,
-            kid_details=[],
         )
-        booking.full_clean()
-        booking.save()
         Booking.objects.filter(pk=booking.pk).update(
             created_at=timezone.now() - timedelta(minutes=45)
         )
@@ -350,17 +333,13 @@ class PayInitiateVsExpiryRaceTests(ThrottlelessTestMixin, APITestCase):
         )
 
     def test_initiate_payment_refuses_a_just_cancelled_booking(self):
-        booking = Booking(
+        booking = create_booking(
+            self.package,
+            rooms=[{"room": self.room_4p, "adult_count": 1, "kid_details": []}],
             customer_name="Racer",
             phone="01700000004",
             email="payrace@example.com",
-            package=self.package,
-            room=self.room_4p,
-            adult_count=1,
-            kid_details=[],
         )
-        booking.full_clean()
-        booking.save()
 
         # 1. the view's validation passes while the booking is still PENDING
         serializer = PaymentInitiateSerializer(
@@ -431,17 +410,13 @@ class DoubleSettlementTests(ThrottlelessTestMixin, APITestCase):
             )
 
     def test_second_full_session_cannot_over_credit(self):
-        booking = Booking(
+        booking = create_booking(
+            self.package,
+            rooms=[{"room": self.room_4p, "adult_count": 1, "kid_details": []}],
             customer_name="Two Tabs",
             phone="01700000005",
             email="twotabs@example.com",
-            package=self.package,
-            room=self.room_4p,
-            adult_count=1,
-            kid_details=[],
         )
-        booking.full_clean()
-        booking.save()
         total = booking.total_amount
 
         # customer opens the payment page twice — identical full-due request
@@ -496,17 +471,13 @@ class ConcurrentSettlementLostUpdateTests(ThrottlelessTestMixin, TransactionTest
         )
 
     def test_two_simultaneous_partial_settlements_both_counted(self):
-        booking = Booking(
+        booking = create_booking(
+            self.package,
+            rooms=[{"room": self.room_4p, "adult_count": 1, "kid_details": []}],
             customer_name="Split Payer",
             phone="01700000006",
             email="split@example.com",
-            package=self.package,
-            room=self.room_4p,
-            adult_count=1,
-            kid_details=[],
         )
-        booking.full_clean()
-        booking.save()
 
         amounts = (Decimal("2000.00"), Decimal("3000.00"))
         payments = []

@@ -13,7 +13,7 @@ from fpdf import FPDF
 
 from .branding import draw_header_logo, draw_signature_block, draw_watermark
 from .invoices import FONTS_DIR
-from .models import Booking
+from .models import Booking, BookingRoom
 
 NAVY = (16, 46, 80)
 ZEBRA = (247, 249, 251)
@@ -22,10 +22,16 @@ RULE = (210, 216, 222)
 
 
 def generate_guide_report_pdf(package):
-    bookings = (
-        Booking.objects.filter(package=package)
-        .exclude(status=Booking.Status.CANCELLED)
-        .select_related("room")
+    # One row per cabin (a family holding several cabins appears once per room),
+    # ordered by room number so the guide walks the ship in sequence. paid/due
+    # belong to the whole booking, so they are printed once — on the booking's
+    # first room here — and left blank on its other rooms, and the totals sum
+    # per booking, never per room (otherwise a 3-cabin family's balance would be
+    # counted three times).
+    booking_rooms = (
+        BookingRoom.objects.filter(package=package)
+        .exclude(booking__status=Booking.Status.CANCELLED)
+        .select_related("booking", "room")
         .order_by("room__room_number")
     )
 
@@ -100,28 +106,38 @@ def generate_guide_report_pdf(package):
     # Rows
     total_paid = total_due = Decimal("0.00")
     total_adults = total_kids = 0
+    seen_bookings = set()  # a booking's paid/due is counted once, on its 1st room
     pdf.set_font("NotoSans", "", 9)
     pdf.set_text_color(40, 40, 40)
-    for i, booking in enumerate(bookings):
-        adults = booking.adult_count
-        kids = len(booking.kid_details)
+    booking_rooms = list(booking_rooms)
+    for i, br in enumerate(booking_rooms):
+        booking = br.booking
+        adults = br.adult_count
+        kids = len(br.kid_details)
+        first_room = booking.pk not in seen_bookings
         pdf.set_fill_color(*(ZEBRA if i % 2 == 0 else (255, 255, 255)))
-        pdf.cell(col["room"], 7, f" {booking.room.room_number}", fill=True)
+        pdf.cell(col["room"], 7, f" {br.room.room_number}", fill=True)
         pdf.cell(col["name"], 7, f" {booking.customer_name}", fill=True)
         pdf.cell(col["phone"], 7, f" {booking.phone}", fill=True)
         pdf.cell(col["adults"], 7, str(adults), fill=True, align="C")
         pdf.cell(col["kids"], 7, str(kids), fill=True, align="C")
-        pdf.cell(col["paid"], 7, f"{booking.paid_amount} ", fill=True, align="R")
-        pdf.set_font("NotoSans", "B" if booking.due_amount > 0 else "", 9)
-        pdf.cell(col["due"], 7, f"{booking.due_amount} ", fill=True, align="R",
+        # paid/due belong to the booking as a whole — print them on its first
+        # room only, blank on the rest, so the guide reads one balance per party.
+        paid_text = f"{booking.paid_amount} " if first_room else ""
+        due_text = f"{booking.due_amount} " if first_room else ""
+        pdf.cell(col["paid"], 7, paid_text, fill=True, align="R")
+        pdf.set_font("NotoSans", "B" if (first_room and booking.due_amount > 0) else "", 9)
+        pdf.cell(col["due"], 7, due_text, fill=True, align="R",
                  new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("NotoSans", "", 9)
-        total_paid += booking.paid_amount
-        total_due += booking.due_amount
+        if first_room:
+            seen_bookings.add(booking.pk)
+            total_paid += booking.paid_amount
+            total_due += booking.due_amount
         total_adults += adults
         total_kids += kids
 
-    if not bookings:
+    if not booking_rooms:
         pdf.set_font("NotoSans", "", 9)
         pdf.cell(epw, 10, "No active bookings for this package.", align="C",
                  new_x="LMARGIN", new_y="NEXT")

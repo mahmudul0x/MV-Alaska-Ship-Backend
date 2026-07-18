@@ -134,12 +134,12 @@ class CutoffPaymentPolicyTests(PaymentTestCase):
             "/api/bookings/",
             {
                 "package_id": self.package.id,
-                "room_id": self.room_2p.id,
                 "customer_name": "Karim",
                 "phone": "01800000000",
                 "email": "karim@example.com",
-                "adult_count": 1,
-                "kid_details": [],
+                "rooms": [
+                    {"room_id": self.room_2p.id, "adult_count": 1, "kid_details": []}
+                ],
             },
             format="json",
         )

@@ -9,21 +9,30 @@ from apps.packages.models import Package, PackageRoom
 from apps.ships.models import Room
 
 from .exceptions import RoomUnavailable
-from .models import Booking, Invoice, Payment
-from .pricing import price_breakdown, snapshot_breakdown
+from .models import Booking, BookingRoom, Invoice, Payment
+from .pricing import booking_price_breakdown, snapshot_booking_breakdown
 
-#: Decimal → string ("11000.00") so DRF's encoder never floats money. Same
-#: shape the booking stores in price_snapshot, so the API and the invoice can
-#: never disagree about what a breakdown looks like.
-breakdown_as_json = snapshot_breakdown
+#: Decimal → string so DRF's encoder never floats money. The API `price_breakdown`
+#: field carries the whole booking's per-room breakdown plus its grand total.
+breakdown_as_json = snapshot_booking_breakdown
 
 
 class KidSerializer(serializers.Serializer):
     age = serializers.IntegerField(min_value=0, max_value=17)
 
 
+class BookingRoomInputSerializer(serializers.Serializer):
+    """One room within a booking: which cabin, and that cabin's own party."""
+
+    room_id = serializers.PrimaryKeyRelatedField(
+        queryset=Room.objects.all(), source="room"
+    )
+    adult_count = serializers.IntegerField(min_value=1)
+    kid_details = KidSerializer(many=True, required=False)
+
+
 class BookingQuoteSerializer(serializers.Serializer):
-    """Validates a prospective booking and prices it — no DB writes.
+    """Validates a prospective (multi-room) booking and prices it — no DB writes.
 
     Also the base of BookingCreateSerializer, so quote and create can never
     disagree on validation or price.
@@ -36,39 +45,58 @@ class BookingQuoteSerializer(serializers.Serializer):
     package_id = serializers.PrimaryKeyRelatedField(
         queryset=Package.objects.public(), source="package"
     )
-    room_id = serializers.PrimaryKeyRelatedField(
-        queryset=Room.objects.all(), source="room"
-    )
-    adult_count = serializers.IntegerField(min_value=1)
-    kid_details = KidSerializer(many=True, required=False)
+    rooms = BookingRoomInputSerializer(many=True)
+
+    def validate_rooms(self, rooms):
+        if not rooms:
+            raise serializers.ValidationError("At least one room is required.")
+        # The same physical cabin cannot be listed twice in one booking — it
+        # would double-count pricing and then fail the (package, room) unique
+        # constraint at save with a confusing "unavailable" instead.
+        room_ids = [entry["room"].pk for entry in rooms]
+        if len(room_ids) != len(set(room_ids)):
+            raise serializers.ValidationError(
+                "A room may only be selected once per booking."
+            )
+        return rooms
 
     def validate(self, attrs):
         package = attrs["package"]
-        room = attrs["room"]
-        kid_details = attrs.get("kid_details") or []
+        rooms = attrs["rooms"]
 
         if self.enforce_cutoff and not package.is_bookable():
             raise serializers.ValidationError(
                 {"package_id": "Booking is closed for this package."}
             )
 
+        for index, entry in enumerate(rooms):
+            self._validate_room(package, index, entry)
+
+        return attrs
+
+    def _validate_room(self, package, index, entry):
+        """Per-room availability + pax limits. Errors are keyed by room index so
+        the frontend can point at the offending cabin."""
+        room = entry["room"]
+        kid_details = entry.get("kid_details") or []
+
         package_room = PackageRoom.objects.filter(package=package, room=room).first()
         if package_room is None:
             raise serializers.ValidationError(
-                {"room_id": "This room is not part of the selected package."}
+                {"rooms": {index: {"room_id": "This room is not part of the "
+                                              "selected package."}}}
             )
         if not package_room.is_available:
             raise RoomUnavailable()
         if (
-            Booking.objects.filter(package=package, room=room)
-            .exclude(status=Booking.Status.CANCELLED)
+            BookingRoom.objects.filter(package=package, room=room, is_active=True)
             .exists()
         ):
             raise RoomUnavailable()
 
         room_type = room.room_type
         errors = {}
-        if attrs["adult_count"] > room_type.max_adults:
+        if entry["adult_count"] > room_type.max_adults:
             errors["adult_count"] = (
                 f"{room_type.name} allows at most {room_type.max_adults} adults."
             )
@@ -77,17 +105,21 @@ class BookingQuoteSerializer(serializers.Serializer):
                 f"{room_type.name} allows at most {room_type.max_kids} kids."
             )
         if errors:
-            raise serializers.ValidationError(errors)
-
-        return attrs
+            raise serializers.ValidationError({"rooms": {index: errors}})
 
     def get_breakdown(self):
-        """Priced breakdown for validated data (all Decimal)."""
+        """Priced breakdown for the whole booking (all Decimal), grand total
+        included."""
         attrs = self.validated_data
-        kid_ages = [kid["age"] for kid in attrs.get("kid_details") or []]
-        return price_breakdown(
-            attrs["room"].room_type, attrs["package"], attrs["adult_count"], kid_ages
-        )
+        rooms = [
+            {
+                "room": entry["room"],
+                "adult_count": entry["adult_count"],
+                "kid_ages": [kid["age"] for kid in entry.get("kid_details") or []],
+            }
+            for entry in attrs["rooms"]
+        ]
+        return booking_price_breakdown(attrs["package"], rooms)
 
 
 class BookingCreateSerializer(BookingQuoteSerializer):
@@ -103,19 +135,38 @@ class BookingCreateSerializer(BookingQuoteSerializer):
     )
 
     def create(self, validated_data):
-        kid_details = [dict(kid) for kid in validated_data.pop("kid_details", [])]
-        booking = Booking(kid_details=kid_details, **validated_data)
+        rooms_data = validated_data.pop("rooms")
+        package = validated_data["package"]
+        booking = Booking(**validated_data)
         # Two insert attempts: a booking_code collision (two concurrent
         # requests drawing the same random code, ~2^-32) must be retried
         # with a fresh code — not misreported as a lost room race.
         for retry_left in (True, False):
             try:
                 with transaction.atomic():
-                    # clean() re-validates pax/availability and computes the
-                    # total server-side; the partial unique constraint is the
-                    # final double-booking guard for true races.
                     booking.full_clean()
                     booking.save()
+                    # Each room validates its own pax/availability and prices
+                    # itself in clean(); the partial unique constraint on
+                    # BookingRoom is the final double-booking guard for true
+                    # races. The whole set is created inside one transaction, so
+                    # if any room is lost to a race the entire booking rolls
+                    # back — a family never ends up half-booked.
+                    for entry in rooms_data:
+                        booking_room = BookingRoom(
+                            booking=booking,
+                            package=package,
+                            room=entry["room"],
+                            adult_count=entry["adult_count"],
+                            kid_details=[dict(k) for k in entry.get("kid_details", [])],
+                        )
+                        booking_room.full_clean()
+                        booking_room.save()
+                    # Now that every room is priced, sum them onto the booking.
+                    booking.reprice()
+                    booking.save(update_fields=[
+                        "total_amount", "price_snapshot", "due_amount", "updated_at"
+                    ])
                 return booking
             except IntegrityError as exc:
                 if "booking_code" in str(exc) and retry_left:
@@ -123,7 +174,7 @@ class BookingCreateSerializer(BookingQuoteSerializer):
                     continue
                 raise RoomUnavailable()
             except DjangoValidationError as exc:
-                if "uniq_active_booking_per_package_room" in str(exc):
+                if "uniq_active_bookingroom_per_package_room" in str(exc):
                     raise RoomUnavailable()
                 raise serializers.ValidationError(
                     getattr(exc, "message_dict", None) or exc.messages
@@ -226,12 +277,27 @@ class BookingPackageSerializer(serializers.ModelSerializer):
         fields = ["id", "start_date", "end_date"]
 
 
+class BookingRoomPublicSerializer(serializers.ModelSerializer):
+    """One room of a booking in the confirmation/status view."""
+
+    room_number = serializers.CharField(source="room.room_number", read_only=True)
+    room_type = serializers.CharField(source="room.room_type.name", read_only=True)
+
+    class Meta:
+        model = BookingRoom
+        fields = [
+            "room_number", "room_type", "adult_count", "kid_details",
+            "room_subtotal",
+        ]
+
+
 class BookingPublicSerializer(serializers.ModelSerializer):
     """Confirmation/status representation. Looked up by unguessable
     booking_code only — never exposes other customers' data."""
 
     package = BookingPackageSerializer(read_only=True)
-    room_number = serializers.CharField(source="room.room_number", read_only=True)
+    rooms = BookingRoomPublicSerializer(many=True, read_only=True)
+    total_pax = serializers.IntegerField(read_only=True)
     # The frontend renders the deposit floor from this — it never computes
     # money client-side.
     min_first_payment = serializers.SerializerMethodField()
@@ -247,12 +313,11 @@ class BookingPublicSerializer(serializers.ModelSerializer):
             "booking_code",
             "status",
             "package",
-            "room_number",
+            "rooms",
+            "total_pax",
             "customer_name",
             "phone",
             "email",
-            "adult_count",
-            "kid_details",
             "special_requests",
             "total_amount",
             "paid_amount",

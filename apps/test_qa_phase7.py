@@ -22,20 +22,22 @@ from django.db import connections
 from django.test import TransactionTestCase
 from rest_framework.test import APIClient, APITestCase
 
-from apps.bookings.models import Booking
+from apps.bookings.models import Booking, BookingRoom
 from apps.bookings.test_api import build_fixtures
 from apps.testing import ThrottlelessTestMixin
 
 
 def booking_payload(package, room, **overrides):
+    adult_count = overrides.pop("adult_count", 1)
+    kid_details = overrides.pop("kid_details", [])
     data = {
         "package_id": package.id,
-        "room_id": room.id,
         "customer_name": "Edge Case",
         "phone": "01700000000",
         "email": "edge@example.com",
-        "adult_count": 1,
-        "kid_details": [],
+        "rooms": [
+            {"room_id": room.id, "adult_count": adult_count, "kid_details": kid_details}
+        ],
     }
     data.update(overrides)
     return data
@@ -87,9 +89,9 @@ class LastRoomTests(ThrottlelessTestMixin, APITestCase):
         )
         self.assertIn(second.status_code, (400, 409))
         self.assertEqual(
-            Booking.objects.filter(package=self.package, room=self.room_2p)
-            .exclude(status=Booking.Status.CANCELLED)
-            .count(),
+            BookingRoom.objects.filter(
+                package=self.package, room=self.room_2p, is_active=True
+            ).count(),
             1,
         )
 
@@ -115,9 +117,9 @@ class NetworkRetryTests(ThrottlelessTestMixin, APITestCase):
         second = self.client.post("/api/bookings/", payload, format="json")
         self.assertIn(second.status_code, (400, 409))
         self.assertEqual(
-            Booking.objects.filter(package=self.package, room=self.room_4p)
-            .exclude(status=Booking.Status.CANCELLED)
-            .count(),
+            BookingRoom.objects.filter(
+                package=self.package, room=self.room_4p, is_active=True
+            ).count(),
             1,
         )
 
@@ -168,9 +170,9 @@ class DoubleSubmitRaceTests(ThrottlelessTestMixin, TransactionTestCase):
 
         self.assertEqual(results.count(201), 1, results)
         self.assertEqual(
-            Booking.objects.filter(package=self.package, room=self.room_4p)
-            .exclude(status=Booking.Status.CANCELLED)
-            .count(),
+            BookingRoom.objects.filter(
+                package=self.package, room=self.room_4p, is_active=True
+            ).count(),
             1,
         )
 

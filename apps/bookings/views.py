@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 class BookingViewSet(
     mixins.CreateModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
 ):
-    queryset = Booking.objects.select_related("package", "room")
+    queryset = Booking.objects.select_related("package").prefetch_related(
+        "rooms__room__room_type"
+    )
     serializer_class = BookingPublicSerializer
     lookup_field = "booking_code"
     throttle_classes = [ScopedRateThrottle]

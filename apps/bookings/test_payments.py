@@ -6,9 +6,9 @@ from django.core.management import call_command
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from apps.testing import ThrottlelessTestMixin, sign_ipn
+from apps.testing import ThrottlelessTestMixin, create_booking, sign_ipn
 
-from .models import Booking, Payment
+from .models import Booking, BookingRoom, Payment
 from .sslcommerz import GatewayError
 from .test_api import build_fixtures
 
@@ -27,19 +27,19 @@ class PaymentTestCase(ThrottlelessTestMixin, APITestCase):
             cls.package,
         ) = build_fixtures()
 
-    def make_booking(self, room=None, adults=2, kids=None):
-        booking = Booking(
-            customer_name="Rahim Uddin",
-            phone="01700000000",
-            email="rahim@example.com",
-            package=self.package,
-            room=room or self.room_4p,
-            adult_count=adults,
-            kid_details=kids or [],
-        )
-        booking.full_clean()
-        booking.save()
-        return booking  # 4P, 2 adults: total = 3500 + 6000 = 9500
+    def make_booking(self, room=None, adults=2, kids=None, rooms=None):
+        # 4P, 2 adults: total = 3500 + 6000 = 9500. Pass rooms=[…] for a
+        # multi-room booking; otherwise a single room is built from
+        # room/adults/kids.
+        if rooms is None:
+            rooms = [
+                {
+                    "room": room or self.room_4p,
+                    "adult_count": adults,
+                    "kid_details": kids or [],
+                }
+            ]
+        return create_booking(self.package, rooms=rooms)
 
     def initiate(self, booking, payload):
         with patch(
@@ -357,16 +357,16 @@ class ExpireStaleBookingsTests(PaymentTestCase):
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
         self.assertEqual(booking.status_logs.count(), 2)  # create + cancel
 
-        rebook = Booking(
+        freed_room = booking.rooms.first().room
+        # Room is free again (cancelled booking's rooms went is_active=False) —
+        # rebooking it must not raise the (package, room) unique constraint.
+        create_booking(
+            self.package,
+            rooms=[{"room": freed_room, "adult_count": 1, "kid_details": []}],
             customer_name="Karim",
             phone="01800000000",
             email="karim@example.com",
-            package=self.package,
-            room=booking.room,
-            adult_count=1,
         )
-        rebook.full_clean()
-        rebook.save()  # room is free again — must not raise
 
     def test_partially_paid_and_fresh_bookings_untouched(self):
         paid = self.make_booking()

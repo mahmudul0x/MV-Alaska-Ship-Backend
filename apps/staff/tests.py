@@ -4,9 +4,9 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
-from apps.bookings.models import Booking, Payment
+from apps.bookings.models import Booking, BookingRoom, Payment
 from apps.bookings.test_api import build_fixtures
-from apps.testing import ThrottlelessTestMixin
+from apps.testing import ThrottlelessTestMixin, create_booking
 
 User = get_user_model()
 
@@ -41,20 +41,19 @@ class StaffApiTestCase(ThrottlelessTestMixin, APITestCase):
         return tokens
 
     def make_booking(self, room=None, **overrides):
-        data = {
-            "customer_name": "Rahim Uddin",
-            "phone": "01700000000",
-            "email": "rahim@example.com",
-            "package": self.package,
-            "room": room or self.room_4p,
-            "adult_count": 2,
-            "kid_details": [],
-        }
-        data.update(overrides)
-        booking = Booking(**data)
-        booking.full_clean()
-        booking.save()
-        return booking
+        adult_count = overrides.pop("adult_count", 2)
+        kid_details = overrides.pop("kid_details", [])
+        return create_booking(
+            self.package,
+            rooms=[
+                {
+                    "room": room or self.room_4p,
+                    "adult_count": adult_count,
+                    "kid_details": kid_details,
+                }
+            ],
+            **overrides,
+        )
 
 
 class StaffAuthTests(StaffApiTestCase):
@@ -149,9 +148,9 @@ class StaffBookingApiTests(StaffApiTestCase):
             "/api/staff/bookings/",
             {
                 "package_id": self.package.id,
-                "room_id": self.room_2p.id,
-                "adult_count": 2,
-                "kid_details": [],
+                "rooms": [
+                    {"room_id": self.room_2p.id, "adult_count": 2, "kid_details": []}
+                ],
                 "customer_name": "Walkin Guest",
                 "phone": "01900000000",
                 "email": "walkin@example.com",
@@ -166,9 +165,9 @@ class StaffBookingApiTests(StaffApiTestCase):
             "/api/staff/bookings/",
             {
                 "package_id": self.package.id,
-                "room_id": self.room_2p.id,
-                "adult_count": 5,
-                "kid_details": [],
+                "rooms": [
+                    {"room_id": self.room_2p.id, "adult_count": 5, "kid_details": []}
+                ],
                 "customer_name": "Too Many",
                 "phone": "01900000001",
                 "email": "toomany@example.com",
@@ -458,17 +457,13 @@ class StaffOverviewTests(StaffApiTestCase):
             payment_type=Payment.PaymentType.PARTIAL,
             status=Payment.Status.SUCCESS,
         )
-        booking_2 = Booking(
+        create_booking(
+            package_2,
+            rooms=[{"room": room_4p_2, "adult_count": 1, "kid_details": []}],
             customer_name="Karim",
             phone="01800000000",
             email="karim@example.com",
-            package=package_2,
-            room=room_4p_2,
-            adult_count=1,
-            kid_details=[],
         )
-        booking_2.full_clean()
-        booking_2.save()
 
         self.auth()
         response = self.client.get("/api/staff/overview/")
