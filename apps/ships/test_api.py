@@ -58,15 +58,32 @@ class ShipFoodMenuApiTests(ThrottlelessTestMixin, APITestCase):
         days = {d["day"]: d for d in data["days"]}
         self.assertEqual(set(days.keys()), {"day_1", "day_2", "day_3"})
 
+        # Days 1 and 2 run Breakfast → Snacks → Lunch → Evening Snacks → Dinner,
+        # and the serializer emits the meals in that serving order.
+        day1_order = [m["meal_type"] for m in days["day_1"]["meals"]]
+        self.assertEqual(
+            day1_order,
+            ["breakfast", "snacks", "lunch", "evening_snacks", "dinner"],
+        )
         day1_meals = {m["meal_type"]: m["items"] for m in days["day_1"]["meals"]}
-        self.assertEqual(set(day1_meals.keys()), {"breakfast", "snacks", "lunch", "dinner"})
         self.assertIn("Bread", day1_meals["breakfast"])
-        # Day-1 has two distinct Snacks item-groups merged into one meal_type bucket.
+        # The two snack sittings are distinct buckets, not one merged group.
         self.assertIn("Fruits Cake", day1_meals["snacks"])
-        self.assertIn("Vegetable Pakura", day1_meals["snacks"])
+        self.assertEqual(
+            day1_meals["evening_snacks"],
+            ["Noodles/Vegetable Pakura", "Vegetable Roll"],
+        )
+
+        day2_meals = {m["meal_type"]: m["items"] for m in days["day_2"]["meals"]}
+        self.assertEqual(
+            day2_meals["evening_snacks"],
+            ["Soup", "French Fry", "Vegetable Pakura"],
+        )
 
         day3_meals = {m["meal_type"]: m["items"] for m in days["day_3"]["meals"]}
         self.assertNotIn("dinner", day3_meals)  # tour ends before Day-3 dinner
+        # Day 3 ends after lunch — no second snack sitting.
+        self.assertNotIn("evening_snacks", day3_meals)
 
     def test_food_menu_excludes_inactive_items(self):
         item = FoodMenuItem.objects.filter(ship=self.ship, day="day_1").first()

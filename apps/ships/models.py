@@ -310,16 +310,21 @@ class FoodMenuItem(models.Model):
         DAY_3 = "day_3", "Day 3"
 
     class MealType(models.TextChoices):
+        # Declaration order is the serving order of the day, and the serializer
+        # emits meals in exactly this order. Days 1 and 2 have two snack
+        # sittings (one before lunch, one after), so they are separate values
+        # rather than one merged "snacks" bucket.
         BREAKFAST = "breakfast", "Breakfast"
         SNACKS = "snacks", "Snacks"
         LUNCH = "lunch", "Lunch"
+        EVENING_SNACKS = "evening_snacks", "Evening Snacks"
         DINNER = "dinner", "Dinner"
 
     ship = models.ForeignKey(
         Ship, on_delete=models.CASCADE, related_name="food_menu_items"
     )
     day = models.CharField(max_length=10, choices=Day.choices)
-    meal_type = models.CharField(max_length=10, choices=MealType.choices)
+    meal_type = models.CharField(max_length=20, choices=MealType.choices)
     name = models.CharField(max_length=100)
     is_active = models.BooleanField(
         default=True, help_text="Uncheck to hide without deleting."

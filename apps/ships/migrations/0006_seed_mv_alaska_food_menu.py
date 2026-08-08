@@ -25,6 +25,9 @@ MENU = [
         "Bread", "Butter", "Jelly", "Egg", "Honey", "Banana", "Tea/Coffee",
         "Plain Parata", "Mixed Vegetable", "Cholar Dal", "Chicken Curry", "Juice",
     ]),
+    # The second Day-1 snack sitting is split out into its own `evening_snacks`
+    # meal type by ships.0014 — kept here as-is so this migration still
+    # reproduces the original seed state.
     (Day1, Snacks, ["Fruits Cake", "Fruits"]),
     (Day1, Snacks, ["Vegetable Roll", "Vegetable Pakura"]),
     (Day1, Lunch, [
