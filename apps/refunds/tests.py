@@ -958,3 +958,51 @@ class InvoiceDownloadLinkTests(ThrottlelessTestMixin, APITestCase):
         )
         self.assertEqual(len(listing.data), 1)
         self.assertEqual(listing.data[0]["number"], self.invoice.number)
+
+
+class PendingCancellationVisibilityTests(ThrottlelessTestMixin, APITestCase):
+    """The booking payload has to say a request is open, or the page shows a
+    live Cancel button to someone who already pressed it."""
+
+    def setUp(self):
+        self.ship, self.package, self.room_a, _ = build_world(
+            ship_name=unique("Pending")
+        )
+        self.booking = make_booking(self.package, self.room_a, paid="8000.00")
+
+    def booking_payload(self):
+        response = self.client.get(f"/api/bookings/{self.booking.booking_code}/")
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_null_until_a_request_exists(self):
+        self.assertIsNone(self.booking_payload()["pending_cancellation"])
+
+    def test_carries_the_open_request_with_its_figures(self):
+        services.create_cancellation_request(
+            self.booking,
+            reason_code=CancellationRequest.Reason.PLANS_CHANGED,
+            refund_method="bkash",
+            refund_account_number="01712345678",
+            refund_account_name="Rahim",
+        )
+        pending = self.booking_payload()["pending_cancellation"]
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["refund_amount"], "7600.00")
+        # Masked here too — this endpoint needs only the booking code.
+        self.assertTrue(pending["refund_account_masked"].endswith("5678"))
+        self.assertNotIn("01712345678", str(pending))
+
+    def test_clears_once_the_request_is_decided(self):
+        staff = User.objects.create_user(
+            username=unique("dec"), password="pass12345", is_staff=True
+        )
+        request = services.create_cancellation_request(
+            self.booking,
+            reason_code=CancellationRequest.Reason.PLANS_CHANGED,
+            refund_method="bkash",
+            refund_account_number="01712345678",
+            refund_account_name="Rahim",
+        )
+        services.reject_cancellation(request, user=staff, note="Spoke to them.")
+        self.assertIsNone(self.booking_payload()["pending_cancellation"])

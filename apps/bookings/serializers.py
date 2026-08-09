@@ -460,6 +460,12 @@ class BookingPublicSerializer(serializers.ModelSerializer):
     # is what stops them discovering it by being refused.
     balance_due_at = serializers.SerializerMethodField()
     balance_deadline_passed = serializers.SerializerMethodField()
+    # A cancellation awaiting a staff decision is deliberately NOT a booking
+    # status (see Booking.has_pending_cancellation), so without this the page
+    # has no way to show that the customer already asked. They would see an
+    # unchanged booking with a live "Cancel" button, conclude the request never
+    # went through, and either send it again or phone in.
+    pending_cancellation = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -479,7 +485,20 @@ class BookingPublicSerializer(serializers.ModelSerializer):
             "min_first_payment",
             "balance_due_at",
             "balance_deadline_passed",
+            "pending_cancellation",
         ]
+
+    def get_pending_cancellation(self, booking):
+        """The open cancellation request, or null.
+
+        Local import: apps.refunds imports this module, so a module-level one
+        would be circular.
+        """
+        from apps.refunds.policy import pending_request_for
+        from apps.refunds.serializers import CancellationRequestPublicSerializer
+
+        pending = pending_request_for(booking)
+        return CancellationRequestPublicSerializer(pending).data if pending else None
 
     def get_min_first_payment(self, booking):
         from .payment_service import minimum_first_payment

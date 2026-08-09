@@ -34,6 +34,10 @@ BOOKING_PUBLIC_FIELDS = {
     # enforced at payment time, so it must be visible before it bites (QA H8).
     "balance_due_at",
     "balance_deadline_passed",
+    # An open cancellation request. It is deliberately not a booking status, so
+    # this is the only way the page can tell that the customer already asked —
+    # without it they see an unchanged booking and a live "Cancel" button.
+    "pending_cancellation",
 }
 
 
