@@ -26,8 +26,7 @@ Or use the committed `render.yaml` via **New → Blueprint**.
 | `CORS_ALLOWED_ORIGINS` | ✅ | Frontend origin(s), e.g. `https://your-app.vercel.app` (comma-separated, **no trailing slash**). |
 | `BACKEND_URL` | ✅ | Full https URL of this service, e.g. `https://mv-alaska-backend.onrender.com`. Used to build SSLCommerz callback URLs. |
 | `FRONTEND_URL` | ✅ | Vercel app URL, e.g. `https://your-app.vercel.app`. Used for post-payment redirects. |
-| `DRF_NUM_PROXIES` | ✅ | `1` normally (Render sits behind one proxy). **`2` if the frontend proxies `/api` to this service** — see "Getting onrender.com out of customer links" below. Wrong here means every visitor shares one throttle bucket. |
-| `PUBLIC_API_BASE_URL` | ⬜ | Origin used to build customer-facing invoice links. Leave blank to build from the request host. See below. |
+| `DRF_NUM_PROXIES` | ✅ | Number of proxies in front of Django — `1` on Render. Getting this wrong means throttles key on the proxy's IP, so **every visitor shares one bucket**; re-check it after any hosting move. |
 | `SSLCOMMERZ_STORE_ID` | ✅ | SSLCommerz store id (sandbox for demo). |
 | `SSLCOMMERZ_STORE_PASSWORD` | ✅ | SSLCommerz store password. |
 | `SSLCOMMERZ_IS_SANDBOX` | ✅ | `True` for the demo. |
@@ -62,54 +61,21 @@ VITE_API_BASE_URL=https://<your-render-host>.onrender.com/api
 
 (The frontend reads `VITE_API_BASE_URL` and expects the `/api` suffix.)
 
-## Getting onrender.com out of customer links
+## The backend host shows up in customer links
 
-Invoice download links are absolute URLs, and by default they carry whatever
-host this service answers on — so a customer's receipt reads
-`https://<your-render-host>.onrender.com/api/invoices/…`. That is not a secrecy
-problem (the API origin is compiled into the frontend bundle either way), but
-it looks unbranded and the link dies if the backend ever moves. Two ways to fix
-it; pick one, not both.
+Invoice download links are absolute URLs built from whatever host this service
+answers on, so on Render a customer's receipt reads
+`https://<your-render-host>.onrender.com/api/invoices/…`.
 
-### Option A — custom domain on this service (recommended)
+This is cosmetic, not a leak: the API origin is compiled into the frontend
+bundle and visible in devtools regardless, so nothing is being concealed either
+way. It is left as-is deliberately — the links are short-lived (30 minutes, see
+`apps/bookings/invoice_access.py`), and the URLs follow the request host with
+no configuration, so **the day this moves to a branded host the links follow by
+themselves**. Serve the API from `api.<your-domain>` and every link reads that
+way with nothing to set.
 
-1. Render → Settings → **Custom Domains** → add `api.<your-domain>`.
-2. At your DNS provider, add the CNAME record Render shows you. Render issues
-   the TLS certificate itself, usually within a few minutes.
-3. Then set:
-   - `ALLOWED_HOSTS` → include `api.<your-domain>`
-   - `PUBLIC_API_BASE_URL` → `https://api.<your-domain>`
-   - `BACKEND_URL` → `https://api.<your-domain>` (SSLCommerz callbacks now
-     carry the branded domain too, so the mid-payment redirect stops flashing
-     onrender.com)
-   - `CORS_ALLOWED_ORIGINS` → the website origin, e.g.
-     `https://www.<your-domain>` (still a cross-origin call — a different
-     subdomain is a different origin)
-   - `DRF_NUM_PROXIES` → stays **1**
-   - Vercel: `VITE_API_BASE_URL` → `https://api.<your-domain>/api`
-4. Remove the `/api` rewrite from `alaskaShip-frontend/vercel.json`, or it sits
-   there as dead config that will confuse the next person.
-
-No extra network hop, no proxy bandwidth, and the payment redirect is branded
-as well. Costs one DNS record.
-
-### Option B — proxy `/api` through the website host
-
-`alaskaShip-frontend/vercel.json` rewrites `/api/*` to this service, so every
-call is same-origin and the customer only ever sees the website's domain.
-
-- Vercel: `VITE_API_BASE_URL` → `/api`
-- `PUBLIC_API_BASE_URL` → the website origin, e.g. `https://www.<your-domain>`
-  (match the canonical host exactly — if the site serves on the apex and `www`
-  only redirects, use the apex, or every download takes a needless redirect)
-- `BACKEND_URL` → **leave as the onrender.com URL**. SSLCommerz callbacks are
-  server-to-server and must reach this service directly, not through Vercel.
-- `DRF_NUM_PROXIES` → **`2`**. This is the trap: there is now an extra hop
-  (browser → Vercel → Render → Django), so at `1` DRF reads Vercel's egress IP
-  as the client and *every visitor lands in the same throttle bucket* — the
-  10/min booking-lookup limit would then be shared by the whole internet.
-  Confirm after deploy by hitting a throttled endpoint from two different
-  networks and checking they do not exhaust each other's budget.
-
-Note that the payment redirect still passes through the backend's own host, so
-onrender.com flashes briefly during checkout. Only Option A removes that.
+Two things to redo on any hosting move: `ALLOWED_HOSTS` must list the new host,
+and `DRF_NUM_PROXIES` must match the real number of proxies in front of Django
+(see the table above — this one is easy to miss and quietly breaks rate
+limiting).

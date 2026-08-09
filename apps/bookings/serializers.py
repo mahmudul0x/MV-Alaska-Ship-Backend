@@ -12,7 +12,6 @@ from .exceptions import RoomUnavailable
 from .guests import clean_foreign_guests, guest_counts, mask_passport
 from .identity import normalize_booking_code, phone_digits
 from . import invoice_access
-from .public_links import public_absolute_uri
 from .models import Booking, BookingRoom, Invoice, Payment
 from .pricing import booking_price_breakdown, snapshot_booking_breakdown
 
@@ -380,7 +379,8 @@ class BookingInvoiceSerializer(serializers.ModelSerializer):
         url = reverse(
             "invoice-download", kwargs={"token": invoice_access.issue(invoice)}
         )
-        return public_absolute_uri(url, self.context.get("request"))
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
 
 
 class BookingPackageSerializer(serializers.ModelSerializer):

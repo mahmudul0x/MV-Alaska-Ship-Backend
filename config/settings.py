@@ -392,17 +392,6 @@ SSLCOMMERZ_TXN_QUERY_URL = (
 BACKEND_URL = env("BACKEND_URL", default="http://localhost:8000")
 FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:5173")
 
-# Origin used to build CUSTOMER-FACING links (invoice downloads). Set it to the
-# website's own origin — e.g. https://mvalaskacruise.com — with the frontend
-# host proxying /api/* to this backend, so a customer's document carries the
-# company's domain instead of the hosting provider's, and the link survives the
-# backend moving. NOT a security boundary (see apps/bookings/public_links.py);
-# leave blank to build from the request host, which is the dev default.
-#
-# MUST NOT be used for the SSLCommerz callback URLs — those are server-to-server
-# and have to reach this backend directly (BACKEND_URL above).
-PUBLIC_API_BASE_URL = env("PUBLIC_API_BASE_URL", default="")
-
 # Unpaid PENDING bookings are auto-cancelled after this hold window.
 BOOKING_HOLD_MINUTES = env.int("BOOKING_HOLD_MINUTES", default=30)
 
