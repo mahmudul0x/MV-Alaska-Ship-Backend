@@ -299,6 +299,52 @@ def send_balance_reminder_email(booking):
     EmailMultiAlternatives(subject=subject, body=body, to=[booking.email]).send()
 
 
+def _cancellation_money_paragraph(booking, paid):
+    """What happens to the money, stated in figures wherever we know them.
+
+    A refund row exists by the time this runs whenever the cancellation went
+    through the refunds service (the row is created inside the same transaction,
+    and this email is dispatched on commit). Then the customer is told the exact
+    charge, the exact refund and when to expect it — not "our team will contact
+    you". The vague wording is kept only as the genuine fallback: cancellations
+    raised straight from the Django admin, where no one has decided the numbers.
+    """
+    from apps.refunds.models import Refund
+
+    refund = (
+        booking.refunds.exclude(status=Refund.Status.VOID)
+        .order_by("-created_at")
+        .first()
+    )
+    if refund is None:
+        return (
+            f"You have paid {paid} BDT against this booking. Our "
+            "cancellation-charge schedule determines how much of this is "
+            "refundable. Our team will contact you on "
+            f"{booking.phone} to arrange any refund — refunds are handled "
+            "manually and are not issued automatically.\n\n"
+        )
+
+    sla_days = booking.package.ship.refund_sla_days
+    lines = [f"Paid:                 {paid} BDT"]
+    if refund.cancellation_charge > 0:
+        lines.append(f"Cancellation charge:  {refund.cancellation_charge} BDT")
+    lines.append(f"Refund due to you:    {refund.amount} BDT")
+    body = "\n".join(lines) + "\n\n"
+    if refund.account_number:
+        body += (
+            f"We will send this to your {refund.get_method_display()} account "
+            f"ending {refund.account_number[-4:]} within {sla_days} working "
+            "days.\n\n"
+        )
+    else:
+        body += (
+            f"Our team will contact you on {booking.phone} to arrange the "
+            f"payout, within {sla_days} working days.\n\n"
+        )
+    return body
+
+
 def send_cancellation_email(booking):
     """Tell the customer their booking is cancelled (QA M3).
 
@@ -324,13 +370,7 @@ def send_cancellation_email(booking):
             f"{package.start_date:%d %b %Y} tour has been cancelled.\n\n"
         )
         if paid > 0:
-            body += (
-                f"You have paid {paid} BDT against this booking. Our "
-                "cancellation-charge schedule determines how much of this is "
-                "refundable. Our team will contact you on "
-                f"{booking.phone} to arrange any refund — refunds are handled "
-                "manually and are not issued automatically.\n\n"
-            )
+            body += _cancellation_money_paragraph(booking, paid)
         else:
             body += "No payment was received against this booking.\n\n"
         body += (

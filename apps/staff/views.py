@@ -667,6 +667,20 @@ class StaffOverviewView(APIView):
             count=Count("pk"), paid_total=Sum("paid_amount")
         )
 
+        # The refund LEDGER, which is a sharper number than the flag above: an
+        # exact amount promised and not yet sent, rather than "this booking has
+        # money on it and is cancelled". Both are reported — the flag still
+        # catches bookings cancelled straight from the Django admin, where
+        # nobody has decided a figure.
+        from apps.refunds.models import CancellationRequest, Refund
+
+        refund_liability = Refund.objects.filter(
+            status=Refund.Status.PENDING
+        ).aggregate(count=Count("pk"), total=Sum("amount"))
+        pending_cancellations = CancellationRequest.objects.filter(
+            status=CancellationRequest.Status.PENDING
+        ).aggregate(count=Count("pk"), total=Sum("refund_amount"))
+
         status_counts = dict(
             Booking.objects.values_list("status").annotate(c=Count("pk")).order_by()
         )
@@ -757,6 +771,12 @@ class StaffOverviewView(APIView):
                 ),
                 "refunds_owed_count": refunds_owed["count"] or 0,
                 "refunds_owed_paid_total": refunds_owed["paid_total"]
+                or Decimal("0.00"),
+                "refund_liability_count": refund_liability["count"] or 0,
+                "refund_liability_total": refund_liability["total"]
+                or Decimal("0.00"),
+                "pending_cancellation_count": pending_cancellations["count"] or 0,
+                "pending_cancellation_refund_total": pending_cancellations["total"]
                 or Decimal("0.00"),
                 "bookings_today": Booking.objects.filter(
                     created_at__date=today

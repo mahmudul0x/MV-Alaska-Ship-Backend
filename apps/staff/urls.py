@@ -3,6 +3,13 @@ from rest_framework.routers import DefaultRouter
 
 from apps.contact.views import StaffContactMessageViewSet
 
+from .refunds_views import (
+    StaffBookingCancelView,
+    StaffCancellationRequestViewSet,
+    StaffCancellationRuleViewSet,
+    StaffDepartureCancelView,
+    StaffRefundViewSet,
+)
 from .views import (
     StaffBookingViewSet,
     StaffCabinImageViewSet,
@@ -41,6 +48,17 @@ router.register("invoices", StaffInvoiceViewSet, basename="staff-invoice")
 router.register(
     "contact-messages", StaffContactMessageViewSet, basename="staff-contact-message"
 )
+router.register(
+    "cancellation-requests",
+    StaffCancellationRequestViewSet,
+    basename="staff-cancellation-request",
+)
+router.register("refunds", StaffRefundViewSet, basename="staff-refund")
+router.register(
+    "cancellation-rules",
+    StaffCancellationRuleViewSet,
+    basename="staff-cancellation-rule",
+)
 
 urlpatterns = [
     path("login/", StaffLoginView.as_view(), name="staff-login"),
@@ -53,6 +71,19 @@ urlpatterns = [
         "foreigner-surcharge/",
         StaffForeignerSurchargeView.as_view(),
         name="staff-foreigner-surcharge",
+    ),
+    # Cancelling on a customer's behalf, and cancelling a whole sailing. Both
+    # are declared before the router so their suffixes resolve ahead of the
+    # generic detail routes.
+    path(
+        "bookings/<int:pk>/cancel/",
+        StaffBookingCancelView.as_view(),
+        name="staff-booking-cancel",
+    ),
+    path(
+        "packages/<int:pk>/cancel-departure/",
+        StaffDepartureCancelView.as_view(),
+        name="staff-package-cancel-departure",
     ),
     path("", include(router.urls)),
 ]

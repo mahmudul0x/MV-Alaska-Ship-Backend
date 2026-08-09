@@ -10,6 +10,7 @@ from apps.ships.models import Room
 
 from .exceptions import RoomUnavailable
 from .guests import clean_foreign_guests, guest_counts, mask_passport
+from .identity import normalize_booking_code, phone_digits
 from .models import Booking, BookingRoom, Invoice, Payment
 from .pricing import booking_price_breakdown, snapshot_booking_breakdown
 
@@ -407,6 +408,32 @@ class BookingRoomPublicSerializer(serializers.ModelSerializer):
             }
             for guest in booking_room.foreign_guests or []
         ]
+
+
+class BookingLookupSerializer(serializers.Serializer):
+    """Input for the public "find my booking" form.
+
+    Normalises the code the way a human types it (case, spaces, a missing
+    "BK-") and requires the last four digits of the booking's phone as a second
+    factor — see apps.bookings.identity for why a bearer code alone is not
+    enough on a form anyone can reach.
+    """
+
+    booking_code = serializers.CharField(max_length=40)
+    phone_last4 = serializers.CharField(max_length=20)
+
+    def validate_booking_code(self, value):
+        code = normalize_booking_code(value)
+        if not code:
+            raise serializers.ValidationError("Enter your booking code.")
+        return code
+
+    def validate_phone_last4(self, value):
+        if len(phone_digits(value)) < 4:
+            raise serializers.ValidationError(
+                "Enter the last 4 digits of the phone number on the booking."
+            )
+        return value
 
 
 class BookingPublicSerializer(serializers.ModelSerializer):

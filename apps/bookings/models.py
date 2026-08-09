@@ -36,6 +36,10 @@ class Booking(models.Model):
         CANCELLED = "cancelled", "Cancelled"
         COMPLETED = "completed", "Completed"
 
+    class BookingType(models.TextChoices):
+        INDIVIDUAL = "individual", "Individual"
+        GROUP = "group", "Group"
+
     booking_code = models.CharField(max_length=20, unique=True, blank=True)
     customer_name = models.CharField(max_length=100)
     phone = models.CharField(max_length=20)
@@ -72,6 +76,20 @@ class Booking(models.Model):
     )
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING
+    )
+    # Which column of the cancellation-charge schedule this booking is judged
+    # by. Deliberately NOT derived from pax count: in this trade "group" is a
+    # contract type (agent, corporate, tour operator), negotiated up front —
+    # a family of twelve is still an individual booking. Ship.group_min_pax
+    # only makes the dashboard SUGGEST the switch; a human decides.
+    booking_type = models.CharField(
+        max_length=12,
+        choices=BookingType.choices,
+        default=BookingType.INDIVIDUAL,
+        help_text=(
+            "Group bookings use the group column of the cancellation-charge "
+            "schedule. Set by staff — never inferred from headcount."
+        ),
     )
     # "We owe this customer money" is first-class, queryable state — never
     # just a log line. Set automatically whenever a booking with real money
@@ -123,6 +141,28 @@ class Booking(models.Model):
     @property
     def total_pax(self):
         return sum(br.total_pax for br in self.rooms.all())
+
+    @property
+    def has_pending_cancellation(self):
+        """True while a cancellation request is awaiting a staff decision.
+
+        Deliberately NOT a Booking.status value. A pending request must not
+        disturb the booking's real state (a fully_paid booking stays fully_paid,
+        keeps its rooms, keeps counting as revenue) — otherwise a rejected
+        request would need the old status restored from somewhere, and every
+        status-driven job (sailing completion, due deadlines, availability)
+        would need teaching about a state that means "nothing has happened yet".
+        The request row is the state; this is the read.
+        """
+        if not self.pk:
+            return False
+        # Local import: apps.refunds imports this module, so a module-level
+        # import here would be circular.
+        from apps.refunds.models import CancellationRequest
+
+        return self.cancellation_requests.filter(
+            status=CancellationRequest.Status.PENDING
+        ).exists()
 
     def reprice(self):
         """Recompute total_amount + price_snapshot from the booking's rooms.

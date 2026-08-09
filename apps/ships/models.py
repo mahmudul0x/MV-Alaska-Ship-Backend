@@ -44,6 +44,33 @@ class Ship(models.Model):
         default=GuideReportDensity.NORMAL,
         help_text="Guide report PDF text size / rows-per-page.",
     )
+
+    # ---- Cancellation / refund policy knobs ------------------------------
+    # Business policy, so data rather than constants — and per-ship, since a
+    # second ship may run a different operation. The charge SCHEDULE itself is
+    # its own table (refunds.CancellationRule); these are the scalars around it.
+    group_min_pax = models.PositiveSmallIntegerField(
+        default=10,
+        help_text=(
+            "Pax count at which the dashboard suggests marking a booking as a "
+            "group. A suggestion only — booking_type is always set by a human."
+        ),
+    )
+    refund_sla_days = models.PositiveSmallIntegerField(
+        default=14,
+        help_text=(
+            "Working days quoted to the customer for a refund payout. Drives "
+            "the promise in the cancellation email and the overdue-refund alert."
+        ),
+    )
+    refund_claim_window_days = models.PositiveSmallIntegerField(
+        default=30,
+        help_text=(
+            "Days after a sailing ends within which staff may raise a refund "
+            "normally. Later claims need an explicit override, so a closed "
+            "accounting month is never reopened by accident."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

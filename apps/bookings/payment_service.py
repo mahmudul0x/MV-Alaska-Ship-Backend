@@ -110,6 +110,19 @@ def initiate_payment(booking, payment_type, amount=None):
             raise ValidationError(
                 {"payment_type": "Nothing is due on this booking."}
             )
+        # A cancellation is awaiting a decision. Taking more money now is the
+        # worst possible timing: the booking is about to be cancelled and every
+        # taka received becomes refundable, so a payment here manufactures a
+        # bigger payout to chase by hand. Withdraw the request to pay.
+        if booking.has_pending_cancellation:
+            raise ValidationError(
+                {
+                    "payment_type": (
+                        "A cancellation request is pending on this booking. "
+                        "Please contact us before making a payment."
+                    )
+                }
+            )
         # Client policy (QA H6): the balance may be paid any time before the
         # journey — a deposit-paid booking is never cancelled for it, and
         # whatever is still owed the guide collects on board. So online balance

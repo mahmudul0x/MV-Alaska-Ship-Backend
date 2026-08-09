@@ -17,6 +17,7 @@ from apps.bookings.views import (
 )
 from apps.contact.views import ContactMessageCreateView
 from apps.packages.views import CalendarView, PackageViewSet
+from apps.refunds.views import CancellationPolicyView
 from apps.ships.views import (
     CabinViewSet,
     GalleryImageViewSet,
@@ -42,6 +43,13 @@ def _no_static_invoices(request, path=None):
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/calendar/", CalendarView.as_view(), name="calendar"),
+    # The published cancellation-charge schedule, so the policy page and the
+    # backend can never disagree about what a cancellation costs.
+    path(
+        "api/cancellation-policy/",
+        CancellationPolicyView.as_view(),
+        name="cancellation-policy",
+    ),
     path("api/payments/ipn/", PaymentIPNView.as_view(), name="payment-ipn"),
     path("api/payments/success/", PaymentSuccessView.as_view(), name="payment-success"),
     path("api/payments/fail/", PaymentFailView.as_view(), name="payment-fail"),

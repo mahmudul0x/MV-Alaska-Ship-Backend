@@ -10,10 +10,12 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from . import payment_service, sslcommerz
+from .identity import normalize_booking_code, phone_last4_matches
 from .models import Booking, Invoice, Payment
 from .serializers import (
     BookingCreateSerializer,
     BookingInvoiceSerializer,
+    BookingLookupSerializer,
     BookingPublicSerializer,
     BookingQuoteSerializer,
     PaymentInitiateSerializer,
@@ -46,9 +48,32 @@ class BookingViewSet(
         # create and pay are mutations and keep the strict "booking" scope.
         if self.action == "quote":
             self.throttle_scope = "quote"
-        elif self.action in ("retrieve", "invoices"):
+        elif self.action in ("retrieve", "invoices", "cancellation_preview"):
             self.throttle_scope = "status"
+        elif self.action == "lookup":
+            # "Find my booking" is the one public endpoint that takes a code
+            # the caller typed rather than one we handed them, so it is the
+            # brute-force surface. Its own tight bucket, separate from the
+            # generous poll budget.
+            self.throttle_scope = "lookup"
+        elif self.action == "cancellation_request":
+            self.throttle_scope = "cancellation"
         return super().get_throttles()
+
+    def get_object(self):
+        """Look up by booking code, tolerating how people actually type it.
+
+        Codes are read off a phone screen and re-typed into a form: lowercase,
+        spaces, a missing "BK-". Postgres matching is exact, so without this
+        every one of those is a 404 on a booking that plainly exists — the
+        single most likely support call the lookup page would generate.
+        """
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        if lookup_url_kwarg in self.kwargs:
+            self.kwargs[lookup_url_kwarg] = normalize_booking_code(
+                self.kwargs[lookup_url_kwarg]
+            )
+        return super().get_object()
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -110,6 +135,141 @@ class BookingViewSet(
                 "amount": str(payment.amount),
                 "payment_type": payment.payment_type,
             }
+        )
+
+    @action(detail=False, methods=["post"])
+    def lookup(self, request):
+        """"Find my booking" — the public manage-booking entry point.
+
+        The confirmation page is reached from the customer's own email link and
+        needs the code alone. This form is different: it is a box on the website
+        that anyone can type into, so it asks for the code AND the last four
+        digits of the booking's phone number. A code that leaks in a forwarded
+        email or a WhatsApp screenshot then no longer opens the booking on its
+        own (see apps.bookings.identity).
+
+        Both failure modes answer identically, so the endpoint never confirms
+        that a code exists to a caller who cannot pass the second factor.
+        """
+        serializer = BookingLookupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        code = serializer.validated_data["booking_code"]
+        booking = self.get_queryset().filter(booking_code=code).first()
+        if booking is None or not phone_last4_matches(
+            booking, serializer.validated_data["phone_last4"]
+        ):
+            return Response(
+                {
+                    "detail": (
+                        "We could not find a booking with that code and phone "
+                        "number. Please check both and try again."
+                    )
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(BookingPublicSerializer(booking).data)
+
+    @action(detail=True, methods=["get"], url_path="cancellation-preview")
+    def cancellation_preview(self, request, booking_code=None):
+        """What cancelling this booking would cost, before committing to it.
+
+        Read-only and writes nothing, so it stays on the booking code alone —
+        it reveals no more than the confirmation page the customer already has.
+        The signed quote token it returns is what the submit endpoint checks the
+        figures against.
+        """
+        from apps.refunds import policy, tokens
+        from apps.refunds.serializers import (
+            CancellationQuoteSerializer,
+            CancellationRequestPublicSerializer,
+        )
+
+        booking = self.get_object()
+        quote = policy.quote_cancellation(booking)
+        payload = CancellationQuoteSerializer(quote).data
+        payload["quote_token"] = tokens.issue(booking, quote) if quote.allowed else None
+        payload["refund_sla_days"] = booking.package.ship.refund_sla_days
+        pending = policy.pending_request_for(booking)
+        payload["pending_request"] = (
+            CancellationRequestPublicSerializer(pending).data if pending else None
+        )
+        return Response(payload)
+
+    @action(detail=True, methods=["post"], url_path="cancellation-request")
+    def cancellation_request(self, request, booking_code=None):
+        """Ask us to cancel this booking.
+
+        Creates a REQUEST — the booking keeps its status and its cabins until a
+        human approves. That is what makes it safe to expose without accounts:
+        the worst a stranger holding a leaked code (and the phone digits) can do
+        is put an item in a queue someone reads.
+
+        A booking with nothing paid is cancelled immediately instead: there is
+        no money decision to make, and parking a dead hold in a queue keeps a
+        sellable cabin off the market for no reason.
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from apps.refunds import policy, services, tokens
+        from apps.refunds.serializers import (
+            CancellationQuoteSerializer,
+            CancellationRequestCreateSerializer,
+            CancellationRequestPublicSerializer,
+        )
+
+        booking = self.get_object()
+        serializer = CancellationRequestCreateSerializer(
+            data=request.data, context={"booking": booking}
+        )
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        quote = policy.quote_cancellation(booking)
+        if not quote.allowed:
+            return Response(
+                {
+                    "detail": "This booking can no longer be cancelled online.",
+                    "block_reason": quote.block_reason,
+                    "quote": CancellationQuoteSerializer(quote).data,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            tokens.verify(data["quote_token"], booking, quote)
+        except tokens.QuoteTokenError as exc:
+            # The numbers moved between preview and submit (a tier boundary
+            # crossed, or the schedule was edited). Refuse and hand back the
+            # fresh quote so the customer re-confirms against the real amount
+            # instead of being charged something they never saw.
+            return Response(
+                {
+                    "detail": str(exc),
+                    "quote": CancellationQuoteSerializer(quote).data,
+                    "quote_token": tokens.issue(booking, quote),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            cancellation = services.create_cancellation_request(
+                booking,
+                reason_code=data["reason_code"],
+                reason_note=data.get("reason_note", ""),
+                refund_method=data["refund_method"],
+                refund_account_name=data["refund_account_name"],
+                refund_account_number=data["refund_account_number"],
+                bank_name=data.get("bank_name", ""),
+                branch_name=data.get("branch_name", ""),
+            )
+        except DjangoValidationError as exc:
+            return Response(
+                exc.message_dict if hasattr(exc, "message_dict") else {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(
+            CancellationRequestPublicSerializer(cancellation).data,
+            status=status.HTTP_201_CREATED,
         )
 
 

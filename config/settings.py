@@ -81,6 +81,7 @@ INSTALLED_APPS = [
     "apps.ships",
     "apps.packages",
     "apps.bookings",
+    "apps.refunds",
     "apps.staff",
     "apps.contact",
 ]
@@ -337,6 +338,16 @@ REST_FRAMEWORK = {
         # inbox, so keep the per-IP rate low enough that the form can't be used
         # to flood it, while still comfortable for a genuine sender.
         "contact": "5/min",
+        # "Find my booking": the only public endpoint where the caller supplies
+        # a booking code we did not hand them, i.e. the one place a code could
+        # be searched for. 64 bits of entropy already makes that hopeless, but
+        # the second factor is four digits — this bucket is what keeps THAT
+        # from being guessable against a code someone genuinely holds.
+        "lookup": "10/min",
+        # Cancellation submissions. Rare by nature (a customer cancels a
+        # holiday once), each one emails staff, and each one is a write against
+        # money — so the budget is deliberately smaller than booking creation.
+        "cancellation": "5/min",
     },
     # Trusted proxy hop count for throttling. Without it DRF keys throttle
     # buckets on the raw client-supplied X-Forwarded-For header, which lets
