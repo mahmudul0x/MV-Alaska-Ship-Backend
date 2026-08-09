@@ -76,27 +76,9 @@ class Package(models.Model):
             "the deadline are cancelled and flagged for a manual refund call."
         ),
     )
-    # Foreign-national surcharge — a FIXED amount per foreign guest, on top of
-    # that guest's ordinary adult/kid fare. Per package (like adult_price) and
-    # admin-editable, never a constant in code. Default 0.00 so every existing
-    # sailing keeps pricing exactly as it did until staff set a rate.
-    foreigner_adult_surcharge = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        validators=[MinValueValidator(Decimal("0.00"))],
-        help_text="Extra charge per foreign adult, on top of the adult fare.",
-    )
-    foreigner_kid_surcharge = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal("0.00"),
-        validators=[MinValueValidator(Decimal("0.00"))],
-        help_text=(
-            "Extra charge per foreign child, on top of that child's age-tier "
-            "fare. A child on a FREE age tier is still surcharged if set."
-        ),
-    )
+    # The foreign-national surcharge is NOT here: it is a global policy row
+    # (ForeignerSurcharge below), not a per-sailing price. See that model for
+    # why it moved.
     # Displayed duration ("3 Days · 2 Nights") for the public package card.
     # Both blank => auto-derived from the dates (nights = date span, days =
     # nights + 1), so a normal sailing needs no data entry. Staff may override
@@ -242,16 +224,6 @@ class Package(models.Model):
                     )
                 }
             )
-
-        # Surcharges are additive money — a negative one would DISCOUNT a
-        # foreign guest below the local fare, which is never the intent and
-        # would be invisible on the invoice (it prints as a charge line).
-        # Checked here as well as by the field validators because clean() is
-        # the gate every non-form path (staff API, admin, shell) goes through.
-        for field in ("foreigner_adult_surcharge", "foreigner_kid_surcharge"):
-            value = getattr(self, field)
-            if value is not None and value < 0:
-                raise ValidationError({field: "Surcharge cannot be negative."})
 
         # Duration overrides are optional, but if set they must be sane and
         # mutually consistent — a nights value ≥ days ("3 Days · 3 Nights")
@@ -556,6 +528,88 @@ class PackageRoom(models.Model):
         self.blocked_by = None
         self.blocked_at = None
         return self
+
+
+class ForeignerSurcharge(models.Model):
+    """Global foreign-national surcharge — a fixed amount per foreign guest.
+
+    A sibling of KidPricingRule, and global for the same reason: this is a
+    pricing POLICY, not the price of a particular sailing. It first lived on
+    Package, which meant staff had to re-enter it for every voyage and — worse
+    — could not change it at all once a voyage had bookings, because a
+    per-package price is part of what those customers were quoted. A policy
+    that applies everywhere and changes rarely belongs in one place.
+
+    Changing it re-prices only FUTURE bookings: every booking freezes the rate
+    it was charged into its own price_snapshot when it is created (see
+    apps.bookings.pricing), so an issued invoice can never be rewritten by an
+    edit here.
+
+    Single row, always pk=1 — enforced in save() so no code path can create a
+    second one and leave "the" surcharge ambiguous.
+    """
+
+    SINGLETON_PK = 1
+
+    adult_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Extra charge per foreign adult, on top of the adult fare.",
+    )
+    kid_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text=(
+            "Extra charge per foreign child, on top of that child's age-tier "
+            "fare. A child on a FREE age tier is still surcharged if set."
+        ),
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Foreigner surcharge"
+        verbose_name_plural = "Foreigner surcharge"
+
+    def __str__(self):
+        return f"Foreign adult {self.adult_amount} / child {self.kid_amount}"
+
+    def clean(self):
+        # Surcharges are additive money — a negative one would DISCOUNT a
+        # foreign guest below the local fare, which is never the intent and is
+        # invisible on the invoice (it prints as a charge line). Checked here
+        # as well as by the field validators because clean() is the gate every
+        # non-form path (staff API, admin, shell) goes through.
+        for field in ("adult_amount", "kid_amount"):
+            value = getattr(self, field)
+            if value is not None and value < 0:
+                raise ValidationError({field: "Surcharge cannot be negative."})
+
+    def save(self, *args, **kwargs):
+        self.pk = self.SINGLETON_PK
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        """Deleting the policy row would make pricing ambiguous rather than
+        free — there is nothing to fall back to. Blocked; set both amounts to
+        0.00 to charge foreign nationals the same as local guests."""
+        raise ValidationError(
+            "The foreigner surcharge cannot be deleted. Set both amounts to "
+            "0.00 to stop charging it."
+        )
+
+    @classmethod
+    def get_solo(cls):
+        """The one row, created with zero amounts on first use.
+
+        Never raises: pricing must work on a fresh database (and in tests) with
+        no admin having visited the settings page, and 0.00 is the correct
+        default — it prices exactly as the system did before the surcharge
+        existed."""
+        return cls.objects.get_or_create(pk=cls.SINGLETON_PK)[0]
 
 
 class KidPricingRule(models.Model):

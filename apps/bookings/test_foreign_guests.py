@@ -12,7 +12,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
-from apps.packages.models import Package
+from apps.packages.models import ForeignerSurcharge, Package
 from apps.testing import ThrottlelessTestMixin
 
 from .guests import clean_foreign_guests, mask_passport, normalise_passport
@@ -28,11 +28,18 @@ def guest(passport="A1234567", guest_type="adult", **extra):
     return {"guest_type": guest_type, "passport_number": passport, **extra}
 
 
+def set_surcharge(adult=ADULT_SURCHARGE, kid=KID_SURCHARGE):
+    """Set the one global policy row — the surcharge is not per-package."""
+    surcharge = ForeignerSurcharge.get_solo()
+    surcharge.adult_amount = adult
+    surcharge.kid_amount = kid
+    surcharge.save()
+    return surcharge
+
+
 class ForeignSurchargePricingTests(BookingBaseTestCase):
     def setUp(self):
-        self.package.foreigner_adult_surcharge = ADULT_SURCHARGE
-        self.package.foreigner_kid_surcharge = KID_SURCHARGE
-        self.package.save()
+        set_surcharge()
 
     def test_surcharge_is_per_person_on_top_of_the_ordinary_fare(self):
         """A foreign adult pays the adult fare AND the surcharge — the
@@ -55,9 +62,7 @@ class ForeignSurchargePricingTests(BookingBaseTestCase):
     def test_zero_surcharge_package_prices_exactly_as_before(self):
         """The default (0.00) must be a no-op even when guests are listed —
         otherwise every existing sailing silently re-prices."""
-        self.package.foreigner_adult_surcharge = Decimal("0.00")
-        self.package.foreigner_kid_surcharge = Decimal("0.00")
-        self.package.save()
+        set_surcharge(adult=Decimal("0.00"), kid=Decimal("0.00"))
         self.assertEqual(
             calculate_total(self.type_4p, self.package, 2, [5], foreign_adults=2),
             calculate_total(self.type_4p, self.package, 2, [5]),
@@ -88,8 +93,9 @@ class ForeignSurchargePricingTests(BookingBaseTestCase):
 
     def test_snapshot_carries_the_rates_so_the_invoice_survives_a_rate_change(self):
         """The invoice itemises from the frozen snapshot. If it read today's
-        package rate, an admin editing the surcharge would rewrite what a
-        paid customer was charged."""
+        policy row, an admin editing the surcharge would rewrite what a paid
+        customer was charged — and now that the rate is GLOBAL, one edit would
+        do that to every past booking at once."""
         booking = self.make_booking(
             rooms=[
                 {
@@ -103,8 +109,7 @@ class ForeignSurchargePricingTests(BookingBaseTestCase):
         self.assertEqual(snap["foreign_adult_count"], 1)
         self.assertEqual(Decimal(snap["foreigner_adult_surcharge"]), ADULT_SURCHARGE)
 
-        self.package.foreigner_adult_surcharge = Decimal("9999.00")
-        self.package.save()
+        set_surcharge(adult=Decimal("9999.00"))
         restored = restore_breakdown(booking.rooms.get().price_snapshot)
         self.assertEqual(restored["foreigner_adult_surcharge"], ADULT_SURCHARGE)
 
@@ -246,9 +251,7 @@ class ForeignGuestAPITests(ThrottlelessTestMixin, APITestCase):
             cls.room_4p,
             cls.package,
         ) = build_fixtures("FN Test Ship")
-        cls.package.foreigner_adult_surcharge = ADULT_SURCHARGE
-        cls.package.foreigner_kid_surcharge = KID_SURCHARGE
-        cls.package.save()
+        set_surcharge()
 
     def payload(self, foreign_guests=None, **extra):
         room = {"room_id": self.room_4p.id, "adult_count": 2}
@@ -376,8 +379,7 @@ class DocumentTests(BookingBaseTestCase):
     """The PDFs must render for both a foreign booking and a legacy one."""
 
     def setUp(self):
-        self.package.foreigner_adult_surcharge = ADULT_SURCHARGE
-        self.package.save()
+        set_surcharge(kid=Decimal("0.00"))
 
     def test_invoice_and_guide_report_render_with_foreign_guests(self):
         from .invoices import generate_invoice_pdf
@@ -434,19 +436,65 @@ class DocumentTests(BookingBaseTestCase):
         self.assertTrue(generate_invoice_pdf(invoice).startswith(b"%PDF"))
 
 
-class PackageSurchargeGuardTests(BookingBaseTestCase):
-    def test_negative_surcharge_is_rejected(self):
-        self.package.foreigner_adult_surcharge = Decimal("-100.00")
-        with self.assertRaises(ValidationError):
-            self.package.clean()
+class SurchargePolicyTests(BookingBaseTestCase):
+    """The surcharge is ONE global row, not a per-package price."""
 
-    def test_surcharge_defaults_to_zero(self):
-        package = Package.objects.create(
+    def test_negative_surcharge_is_rejected(self):
+        surcharge = ForeignerSurcharge.get_solo()
+        surcharge.adult_amount = Decimal("-100.00")
+        with self.assertRaises(ValidationError):
+            surcharge.clean()
+
+    def test_defaults_to_zero_on_a_fresh_database(self):
+        """Pricing must work before any admin has visited the settings page,
+        and 0.00 prices exactly as the system did before the surcharge
+        existed."""
+        surcharge = ForeignerSurcharge.get_solo()
+        self.assertEqual(surcharge.adult_amount, Decimal("0.00"))
+        self.assertEqual(surcharge.kid_amount, Decimal("0.00"))
+
+    def test_only_ever_one_row(self):
+        """Two rows would make "the" surcharge ambiguous — save() pins the pk."""
+        set_surcharge()
+        ForeignerSurcharge(adult_amount=Decimal("50.00")).save()
+        self.assertEqual(ForeignerSurcharge.objects.count(), 1)
+        self.assertEqual(
+            ForeignerSurcharge.get_solo().adult_amount, Decimal("50.00")
+        )
+
+    def test_it_cannot_be_deleted(self):
+        """There is no fallback policy to read if the row disappears."""
+        with self.assertRaises(ValidationError):
+            ForeignerSurcharge.get_solo().delete()
+
+    def test_one_rate_applies_to_every_package(self):
+        """The point of the move: staff set it once, not per sailing."""
+        set_surcharge()
+        other = Package.objects.create(
             ship=self.ship,
             start_date=date(2027, 3, 1),
             end_date=date(2027, 3, 3),
             adult_price=Decimal("3000.00"),
-            status=Package.Status.DRAFT,
+            status=Package.Status.OPEN,
         )
-        self.assertEqual(package.foreigner_adult_surcharge, Decimal("0.00"))
-        self.assertEqual(package.foreigner_kid_surcharge, Decimal("0.00"))
+        for package in (self.package, other):
+            self.assertEqual(
+                calculate_total(self.type_2p, package, 1, [], foreign_adults=1)
+                - calculate_total(self.type_2p, package, 1, []),
+                ADULT_SURCHARGE,
+            )
+
+    def test_changing_it_does_not_touch_an_existing_booking(self):
+        """A global rate means one edit could otherwise re-price every booking
+        ever made. The frozen snapshot and total are what prevent that."""
+        set_surcharge()
+        booking = self.make_booking(
+            rooms=[
+                {"room": self.room_2p, "adult_count": 1, "foreign_guests": [guest()]}
+            ]
+        )
+        before = booking.total_amount
+        set_surcharge(adult=Decimal("9999.00"))
+        booking.refresh_from_db()
+        booking.reprice()
+        self.assertEqual(booking.total_amount, before)

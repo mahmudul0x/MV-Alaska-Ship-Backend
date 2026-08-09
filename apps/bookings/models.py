@@ -355,9 +355,9 @@ class BookingRoom(models.Model):
     #    "nationality": "US",           # optional, ISO 3166-1 alpha-2
     #    "passport_expiry": "2031-04-09"}  # optional, ISO date
     #
-    # The COUNTS here are the surcharge quantity: foreign_adult_count guests
-    # pay package.foreigner_adult_surcharge each, on top of their ordinary
-    # fare. Guests listed here are NOT extra pax — they are a subset of
+    # The COUNTS here are the surcharge quantity: each foreign guest pays the
+    # global ForeignerSurcharge rate for their fare type, on top of their
+    # ordinary fare. Guests listed here are NOT extra pax — they are a subset of
     # adult_count / kid_details, so the totals never double-count.
     foreign_guests = models.JSONField(
         default=list,

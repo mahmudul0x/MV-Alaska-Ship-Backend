@@ -8,6 +8,7 @@ from .views import (
     StaffCabinImageViewSet,
     StaffCabinViewSet,
     StaffFoodMenuItemViewSet,
+    StaffForeignerSurchargeView,
     StaffGalleryImageViewSet,
     StaffInvoiceViewSet,
     StaffKidPricingRuleViewSet,
@@ -46,5 +47,12 @@ urlpatterns = [
     path("login/refresh/", StaffTokenRefreshView.as_view(), name="staff-token-refresh"),
     path("logout/", StaffLogoutView.as_view(), name="staff-logout"),
     path("overview/", StaffOverviewView.as_view(), name="staff-overview"),
+    # Singleton: one row, no create/delete — a plain detail route, not a
+    # router registration that would advertise a list and a POST.
+    path(
+        "foreigner-surcharge/",
+        StaffForeignerSurchargeView.as_view(),
+        name="staff-foreigner-surcharge",
+    ),
     path("", include(router.urls)),
 ]

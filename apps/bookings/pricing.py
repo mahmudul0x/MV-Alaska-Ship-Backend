@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 
-from apps.packages.models import KidPricingRule
+from apps.packages.models import ForeignerSurcharge, KidPricingRule
 
 ZERO = Decimal("0.00")
 
@@ -25,10 +25,11 @@ def price_breakdown(
 
     `foreign_adults` / `foreign_kids` are the counts of guests already included
     in adult_count / kid_ages who are foreign nationals — a SUBSET, not extra
-    people. Each pays a fixed per-person surcharge from the package on top of
-    their ordinary fare, so a foreign child on the free age tier still carries
-    the kid surcharge if one is configured. Callers pass the counts rather than
-    the guest list because pricing has no business reading passport data.
+    people. Each pays a fixed per-person surcharge from the global
+    ForeignerSurcharge policy on top of their ordinary fare, so a foreign child
+    on the free age tier still carries the kid surcharge if one is configured.
+    Callers pass the counts rather than the guest list because pricing has no
+    business reading passport data.
     """
     adults_subtotal = package.adult_price * adult_count
     # Load every kid-pricing tier ONCE, not one query per child: the rules are a
@@ -38,8 +39,15 @@ def price_breakdown(
     rules = list(KidPricingRule.objects.all())
     kids = [{"age": age, "charge": kid_charge(age, package, rules)} for age in kid_ages]
     kids_subtotal = sum((kid["charge"] for kid in kids), ZERO)
-    adult_surcharge = package.foreigner_adult_surcharge or ZERO
-    kid_surcharge = package.foreigner_kid_surcharge or ZERO
+    # One global policy row, not a per-sailing price. Only read when there is
+    # actually a foreign guest to charge, so a domestic booking — the vast
+    # majority — costs no extra query.
+    if foreign_adults or foreign_kids:
+        surcharge = ForeignerSurcharge.get_solo()
+        adult_surcharge = surcharge.adult_amount or ZERO
+        kid_surcharge = surcharge.kid_amount or ZERO
+    else:
+        adult_surcharge = kid_surcharge = ZERO
     foreigner_subtotal = (
         adult_surcharge * foreign_adults + kid_surcharge * foreign_kids
     )

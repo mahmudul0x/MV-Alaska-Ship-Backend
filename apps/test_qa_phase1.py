@@ -298,7 +298,12 @@ class QueryCountTests(QaPhase1TestCase):
                 adult_price=Decimal("3000.00"),
                 status=Package.Status.OPEN,
             )
-        with self.assertNumQueries(1):
+        # Two, and two for ANY number of packages — which is what this guards.
+        # 1: the package list itself (ship join included).
+        # 2: the global ForeignerSurcharge policy row, fetched once per
+        #    response and reused for every package in it. It is published on
+        #    each package because that is where a booking client needs it.
+        with self.assertNumQueries(2):
             self.client.get("/api/packages/")
 
     def test_calendar_query_count_constant(self):

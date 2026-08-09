@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from apps.ships.serializers import RoomImageSerializer, RoomTypeSerializer
 
-from .models import KidPricingRule, Package, PackageRoom
+from .models import ForeignerSurcharge, KidPricingRule, Package, PackageRoom
 
 
 class ShipMiniSerializer(serializers.Serializer):
@@ -28,6 +28,12 @@ class PackageListSerializer(serializers.ModelSerializer):
     days = serializers.SerializerMethodField()
     is_bookable = serializers.SerializerMethodField()
     booking_status = serializers.SerializerMethodField()
+    # The surcharge is a global policy row, but it is published ON the package
+    # because that is where a booking client needs it: the wizard quotes a
+    # sailing, not a settings table. Keeping the field names means moving the
+    # storage did not change the public API contract at all.
+    foreigner_adult_surcharge = serializers.SerializerMethodField()
+    foreigner_kid_surcharge = serializers.SerializerMethodField()
 
     hero_image = serializers.ImageField(read_only=True, use_url=True)
 
@@ -66,6 +72,19 @@ class PackageListSerializer(serializers.ModelSerializer):
 
     def get_booking_status(self, package):
         return "open" if package.is_bookable() else "closed"
+
+    def _surcharge(self):
+        """The policy row, fetched once per serialization pass rather than once
+        per package — the list endpoint renders every open sailing."""
+        if not hasattr(self, "_surcharge_cache"):
+            self._surcharge_cache = ForeignerSurcharge.get_solo()
+        return self._surcharge_cache
+
+    def get_foreigner_adult_surcharge(self, package):
+        return str(self._surcharge().adult_amount)
+
+    def get_foreigner_kid_surcharge(self, package):
+        return str(self._surcharge().kid_amount)
 
 
 class PackageDetailSerializer(PackageListSerializer):

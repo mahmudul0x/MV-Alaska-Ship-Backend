@@ -1,7 +1,7 @@
 from django.contrib import admin, messages
 from django.http import HttpResponse
 
-from .models import KidPricingRule, Package, PackageRoom
+from .models import ForeignerSurcharge, KidPricingRule, Package, PackageRoom
 
 
 class PackageRoomInline(admin.TabularInline):
@@ -29,20 +29,6 @@ class PackageAdmin(admin.ModelAdmin):
         (
             "Booking control",
             {"fields": ("status", "is_booking_open", "booking_cutoff_datetime")},
-        ),
-        (
-            "Foreign national surcharge",
-            {
-                "fields": (
-                    "foreigner_adult_surcharge",
-                    "foreigner_kid_surcharge",
-                ),
-                "description": (
-                    "Fixed extra charge per foreign guest, on top of that "
-                    "guest's ordinary adult/child fare. Leave at 0.00 to charge "
-                    "foreign nationals the same as local guests."
-                ),
-            },
         ),
         (
             "Displayed duration",
@@ -113,3 +99,18 @@ class PackageAdmin(admin.ModelAdmin):
 class KidPricingRuleAdmin(admin.ModelAdmin):
     list_display = ("__str__", "min_age", "max_age", "charge_type", "amount")
     list_editable = ("min_age", "max_age", "amount")
+
+
+@admin.register(ForeignerSurcharge)
+class ForeignerSurchargeAdmin(admin.ModelAdmin):
+    """Singleton — the admin must offer edit only. "Add" would appear to make a
+    second policy row (save() would silently overwrite the first), and "delete"
+    would leave pricing with no policy to read."""
+
+    list_display = ("__str__", "adult_amount", "kid_amount", "updated_at")
+
+    def has_add_permission(self, request):
+        return not ForeignerSurcharge.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False

@@ -6,7 +6,7 @@ from django.db import transaction
 from django.db.models import Count, OuterRef, Q, Subquery, Sum
 from django.http import FileResponse, Http404, HttpResponse
 from django.utils import timezone
-from rest_framework import mixins, status, viewsets
+from rest_framework import generics, mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
@@ -21,7 +21,13 @@ from apps.bookings import invoices, payment_service
 from apps.bookings.models import Booking, BookingRoom, Invoice, Payment
 from apps.bookings.reports import generate_guide_report_pdf
 from apps.bookings.serializers import BookingPublicSerializer
-from apps.packages.models import KidPricingRule, Package, PackageRoom, RoomBlocked
+from apps.packages.models import (
+    ForeignerSurcharge,
+    KidPricingRule,
+    Package,
+    PackageRoom,
+    RoomBlocked,
+)
 from apps.ships.models import (
     Cabin,
     CabinImage,
@@ -43,6 +49,7 @@ from .serializers import (
     StaffFoodMenuItemSerializer,
     StaffGalleryImageSerializer,
     StaffInvoiceSerializer,
+    StaffForeignerSurchargeSerializer,
     StaffKidPricingRuleSerializer,
     StaffPackageRoomSerializer,
     StaffPackageSerializer,
@@ -566,6 +573,22 @@ class StaffKidPricingRuleViewSet(viewsets.ModelViewSet):
     pagination_class = None
     serializer_class = StaffKidPricingRuleSerializer
     queryset = KidPricingRule.objects.all().order_by("min_age")
+
+
+class StaffForeignerSurchargeView(generics.RetrieveUpdateAPIView):
+    """GET/PATCH the one global foreigner-surcharge row.
+
+    Not a ViewSet: there is exactly one row and it can be neither created nor
+    deleted, so a list/detail router would offer operations that do not exist.
+    get_object() creates it on first read, so the settings page never has to
+    handle "no row yet".
+    """
+
+    permission_classes = [IsAdminUser]
+    serializer_class = StaffForeignerSurchargeSerializer
+
+    def get_object(self):
+        return ForeignerSurcharge.get_solo()
 
 
 class StaffFoodMenuItemViewSet(viewsets.ModelViewSet):

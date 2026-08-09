@@ -21,7 +21,12 @@ from apps.bookings.models import (
     Payment,
 )
 from apps.bookings.serializers import BookingCreateSerializer
-from apps.packages.models import KidPricingRule, Package, PackageRoom
+from apps.packages.models import (
+    ForeignerSurcharge,
+    KidPricingRule,
+    Package,
+    PackageRoom,
+)
 from apps.ships.models import (
     Cabin,
     CabinImage,
@@ -387,6 +392,34 @@ class StaffRoomBlockSerializer(serializers.Serializer):
     )
 
 
+class StaffForeignerSurchargeSerializer(serializers.ModelSerializer):
+    """The single global foreigner-surcharge row.
+
+    Sits beside the kid-pricing rules in Room Settings because it is the same
+    kind of thing: a pricing policy that applies to every sailing. Editing it
+    re-prices only future bookings — issued ones carry their own frozen rate.
+    """
+
+    class Meta:
+        model = ForeignerSurcharge
+        fields = ["adult_amount", "kid_amount", "updated_at"]
+        read_only_fields = ["updated_at"]
+
+    def validate(self, attrs):
+        # DRF never calls model clean(), and the field validators alone would
+        # let a raw negative through on a partial update.
+        instance = ForeignerSurcharge(
+            adult_amount=attrs.get(
+                "adult_amount", getattr(self.instance, "adult_amount", Decimal("0.00"))
+            ),
+            kid_amount=attrs.get(
+                "kid_amount", getattr(self.instance, "kid_amount", Decimal("0.00"))
+            ),
+        )
+        instance.clean()
+        return attrs
+
+
 class StaffKidPricingRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = KidPricingRule
@@ -427,7 +460,6 @@ class StaffPackageSerializer(serializers.ModelSerializer):
             "id", "ship", "ship_name", "start_date", "end_date",
             "booking_cutoff_datetime", "adult_price", "status", "is_booking_open",
             "min_deposit_percent", "balance_due_days_before_start",
-            "foreigner_adult_surcharge", "foreigner_kid_surcharge",
             "duration_days", "duration_nights", "effective_days", "effective_nights",
             "marketing_title", "marketing_description", "hero_image", "highlights",
             "bookings_count", "paid_total", "due_total", "rooms_total", "is_bookable",
@@ -463,8 +495,6 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         package.min_deposit_percent = value("min_deposit_percent")
         package.duration_days = value("duration_days")
         package.duration_nights = value("duration_nights")
-        package.foreigner_adult_surcharge = value("foreigner_adult_surcharge")
-        package.foreigner_kid_surcharge = value("foreigner_kid_surcharge")
         package.clean()
 
         # Changing the price of a sailing that already has bookings on it means
@@ -473,35 +503,22 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         # flight (QA C7), so their money is safe — but the two would silently
         # disagree, and the guide's collection sheet is printed from the
         # booking. Cancel-and-rebook is the honest path, so refuse the edit.
-        #
-        # The foreigner surcharges are priced money on exactly the same terms —
-        # a foreign guest who booked at a 0 surcharge was quoted that, and their
-        # frozen snapshot would silently disagree with the package — so they are
-        # locked by the same rule.
-        priced_fields = (
-            ("adult_price", "price"),
-            ("foreigner_adult_surcharge", "foreign-adult surcharge"),
-            ("foreigner_kid_surcharge", "foreign-child surcharge"),
-        )
-        if self.instance:
-            for field, label in priced_fields:
-                if field not in attrs or attrs[field] == getattr(self.instance, field):
-                    continue
+        if self.instance and "adult_price" in attrs:
+            if attrs["adult_price"] != self.instance.adult_price:
                 active = self.instance.bookings.exclude(
                     status=Booking.Status.CANCELLED
                 ).count()
                 if active:
                     raise serializers.ValidationError(
                         {
-                            field: (
+                            "adult_price": (
                                 f"This package has {active} active booking(s) — "
-                                f"its {label} cannot be changed. Those customers "
-                                "were quoted the current price and their bookings "
-                                "hold it. Cancel and rebook them to re-price."
+                                "its price cannot be changed. Those customers were "
+                                "quoted the current price and their bookings hold "
+                                "it. Cancel and rebook them to re-price."
                             )
                         }
                     )
-                break
 
         # Moving a package to another ship would leave the old ship's rooms
         # attached: the public rooms endpoint would sell cabins that are not
