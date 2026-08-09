@@ -18,6 +18,10 @@ PACKAGE_LIST_FIELDS = {
     "nights",
     "days",
     "adult_price",
+    # Advertised foreign-national rates, so the booking wizard can quote the
+    # surcharge before a passport is entered.
+    "foreigner_adult_surcharge",
+    "foreigner_kid_surcharge",
     "booking_cutoff_datetime",
     "is_bookable",
     "booking_status",

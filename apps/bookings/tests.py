@@ -90,6 +90,7 @@ class BookingBaseTestCase(TestCase):
                 room=entry["room"],
                 adult_count=entry["adult_count"],
                 kid_details=entry.get("kid_details", []),
+                foreign_guests=entry.get("foreign_guests", []),
             )
             br.full_clean()
             br.save()

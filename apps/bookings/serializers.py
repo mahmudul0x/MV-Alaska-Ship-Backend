@@ -9,6 +9,7 @@ from apps.packages.models import Package, PackageRoom
 from apps.ships.models import Room
 
 from .exceptions import RoomUnavailable
+from .guests import clean_foreign_guests, guest_counts, mask_passport
 from .models import Booking, BookingRoom, Invoice, Payment
 from .pricing import booking_price_breakdown, snapshot_booking_breakdown
 
@@ -29,6 +30,14 @@ class BookingRoomInputSerializer(serializers.Serializer):
     )
     adult_count = serializers.IntegerField(min_value=1)
     kid_details = KidSerializer(many=True, required=False)
+    # Foreign nationals among this cabin's pax (a subset of adult_count /
+    # kid_details), each with a passport. Left as a loose list here on purpose:
+    # apps.bookings.guests.clean_foreign_guests owns the whole shape, and the
+    # model's clean() calls the SAME function, so the quote endpoint and the
+    # create path can never drift on what a valid guest list is.
+    foreign_guests = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list
+    )
 
 
 class BookingQuoteSerializer(serializers.Serializer):
@@ -41,6 +50,10 @@ class BookingQuoteSerializer(serializers.Serializer):
     # Staff subclasses flip this off: admins may book past the cutoff
     # (PRD §5.5 manual override); the public API always enforces it.
     enforce_cutoff = True
+    # A quote is a price preview and prices depend only on how MANY foreign
+    # guests there are, so it accepts the counts without their passports.
+    # BookingCreateSerializer flips this on — a booking must identify them.
+    require_passport = False
 
     package_id = serializers.PrimaryKeyRelatedField(
         queryset=Package.objects.public(), source="package"
@@ -71,6 +84,36 @@ class BookingQuoteSerializer(serializers.Serializer):
 
         for index, entry in enumerate(rooms):
             self._validate_room(package, index, entry)
+
+        # One passport cannot appear in two cabins of the same booking: that is
+        # one person billed two foreigner surcharges and printed twice on the
+        # immigration manifest. Per-cabin duplicates are caught inside
+        # clean_foreign_guests; only the cross-cabin case is left, and it needs
+        # the whole (now normalised) booking in view.
+        seen = {}
+        for index, entry in enumerate(rooms):
+            for guest in entry.get("foreign_guests") or []:
+                passport = guest["passport_number"]
+                # Blank only on the quote path (require_passport=False), where
+                # several unidentified guests are the normal state — they are
+                # not duplicates of each other.
+                if not passport:
+                    continue
+                if passport in seen:
+                    raise serializers.ValidationError(
+                        {
+                            "rooms": {
+                                index: {
+                                    "foreign_guests": (
+                                        f"Passport {passport} is already listed "
+                                        f"on room {seen[passport]} of this "
+                                        "booking."
+                                    )
+                                }
+                            }
+                        }
+                    )
+                seen[passport] = entry["room"].room_number
 
         return attrs
 
@@ -110,22 +153,47 @@ class BookingQuoteSerializer(serializers.Serializer):
         if errors:
             raise serializers.ValidationError({"rooms": {index: errors}})
 
+        # Foreign guests, validated by the same function the model's clean()
+        # uses. The cleaned (normalised, upper-cased) list is written BACK onto
+        # the entry so both the quote's pricing and the created BookingRoom see
+        # canonical passports — the cross-cabin duplicate check downstream
+        # depends on that normalisation.
+        try:
+            entry["foreign_guests"] = clean_foreign_guests(
+                entry.get("foreign_guests"),
+                adult_count=entry["adult_count"],
+                kid_count=len(kid_details),
+                require_passport=self.require_passport,
+            )
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(
+                {"rooms": {index: {"foreign_guests": exc.messages}}}
+            ) from None
+
     def get_breakdown(self):
         """Priced breakdown for the whole booking (all Decimal), grand total
         included."""
         attrs = self.validated_data
-        rooms = [
-            {
-                "room": entry["room"],
-                "adult_count": entry["adult_count"],
-                "kid_ages": [kid["age"] for kid in entry.get("kid_details") or []],
-            }
-            for entry in attrs["rooms"]
-        ]
+        rooms = []
+        for entry in attrs["rooms"]:
+            foreign_adults, foreign_kids = guest_counts(entry.get("foreign_guests"))
+            rooms.append(
+                {
+                    "room": entry["room"],
+                    "adult_count": entry["adult_count"],
+                    "kid_ages": [kid["age"] for kid in entry.get("kid_details") or []],
+                    "foreign_adults": foreign_adults,
+                    "foreign_kids": foreign_kids,
+                }
+            )
         return booking_price_breakdown(attrs["package"], rooms)
 
 
 class BookingCreateSerializer(BookingQuoteSerializer):
+    # Unlike a quote, a booking must identify every foreign guest — the
+    # passport is what goes on the boarding manifest.
+    require_passport = True
+
     customer_name = serializers.CharField(max_length=100)
     phone = serializers.CharField(max_length=20)
     email = serializers.EmailField()
@@ -187,6 +255,12 @@ class BookingCreateSerializer(BookingQuoteSerializer):
                             room=entry["room"],
                             adult_count=entry["adult_count"],
                             kid_details=[dict(k) for k in entry.get("kid_details", [])],
+                            # Already normalised by _validate_room; clean()
+                            # re-runs the same validation as the un-bypassable
+                            # guard for non-serializer paths (admin, shell).
+                            foreign_guests=[
+                                dict(g) for g in entry.get("foreign_guests") or []
+                            ],
                         )
                         booking_room.full_clean()
                         booking_room.save()
@@ -310,12 +384,28 @@ class BookingRoomPublicSerializer(serializers.ModelSerializer):
 
     room_number = serializers.CharField(source="room.room_number", read_only=True)
     room_type = serializers.CharField(source="room.room_type.name", read_only=True)
+    foreign_guests = serializers.SerializerMethodField()
 
     class Meta:
         model = BookingRoom
         fields = [
             "room_number", "room_type", "adult_count", "kid_details",
-            "room_subtotal",
+            "foreign_guests", "room_subtotal",
+        ]
+
+    def get_foreign_guests(self, booking_room):
+        """Foreign guests with their passports MASKED.
+
+        This endpoint is reached with a booking code alone — no login — so it
+        must never render a full passport number. The customer sees enough to
+        recognise which guest a row is (and to spot a typo in the last digits);
+        staff APIs and the manifest PDF carry the full number."""
+        return [
+            {
+                **{k: v for k, v in guest.items() if k != "passport_number"},
+                "passport_number": mask_passport(guest.get("passport_number")),
+            }
+            for guest in booking_room.foreign_guests or []
         ]
 
 

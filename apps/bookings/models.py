@@ -11,6 +11,7 @@ from django.utils import timezone
 from apps.packages.models import Package, PackageRoom
 from apps.ships.models import Room
 
+from .guests import clean_foreign_guests, guest_counts
 from .pricing import price_breakdown, snapshot_breakdown
 
 
@@ -340,6 +341,33 @@ class BookingRoom(models.Model):
         blank=True,
         help_text='List of kids as [{"age": 5}, ...]. Ages drive kid pricing.',
     )
+    # Foreign nationals in THIS cabin — one entry per foreign guest, each
+    # carrying that guest's passport. Same idiom as kid_details (a JSON list of
+    # dicts on the row that is priced) rather than a side table, because the
+    # list is both a pricing input and a per-cabin record: BookingRoom.clean()
+    # prices itself, and a child table's rows cannot exist before the row they
+    # point at is saved.
+    #
+    # Entry shape — passport_number is the only required key (client policy):
+    #   {"guest_type": "adult"|"kid",   # which fare this guest sits on
+    #    "passport_number": "A1234567", # REQUIRED, normalised uppercase
+    #    "full_name": "…",              # optional
+    #    "nationality": "US",           # optional, ISO 3166-1 alpha-2
+    #    "passport_expiry": "2031-04-09"}  # optional, ISO date
+    #
+    # The COUNTS here are the surcharge quantity: foreign_adult_count guests
+    # pay package.foreigner_adult_surcharge each, on top of their ordinary
+    # fare. Guests listed here are NOT extra pax — they are a subset of
+    # adult_count / kid_details, so the totals never double-count.
+    foreign_guests = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            'Foreign nationals in this cabin, e.g. [{"guest_type": "adult", '
+            '"passport_number": "A1234567"}]. A subset of the cabin\'s pax — '
+            "each one adds the package's foreigner surcharge."
+        ),
+    )
     # Frozen priced subtotal for THIS room and its per-room itemisation, taken
     # when the room is priced (same freeze rules as the booking — see
     # Booking.reprice()). The booking's total_amount sums these; the invoice
@@ -377,6 +405,16 @@ class BookingRoom(models.Model):
     def total_pax(self):
         return self.adult_count + len(self.kid_details)
 
+    @property
+    def foreign_pax(self):
+        """(foreign_adults, foreign_kids) in this cabin — the surcharge
+        quantities. A subset of total_pax, never added to it."""
+        return guest_counts(self.foreign_guests)
+
+    @property
+    def has_foreign_guests(self):
+        return bool(self.foreign_guests)
+
     def clean(self):
         if not self.room_id:
             return  # field-level "required" error already covers this
@@ -410,6 +448,20 @@ class BookingRoom(models.Model):
                 f"{room_type.name} allows at most {room_type.max_kids} kids."
             )
 
+        # Foreign guests are a SUBSET of the cabin's pax, so they can only be
+        # checked once the pax counts themselves are sound — otherwise the
+        # "3 foreign adults but only N adults" message would quote a count the
+        # customer is already being told is invalid.
+        if "adult_count" not in errors and "kid_details" not in errors:
+            try:
+                self.foreign_guests = clean_foreign_guests(
+                    self.foreign_guests,
+                    adult_count=self.adult_count or 0,
+                    kid_count=len(self.kid_details),
+                )
+            except ValidationError as exc:
+                errors["foreign_guests"] = exc.messages
+
         # Membership only: the room must actually be attached to the package
         # (so we can price against it). Availability — is_available, the admin
         # is_blocked hold, and the "already actively booked" check — is NO
@@ -435,8 +487,14 @@ class BookingRoom(models.Model):
         if not self.booking_id or (
             self.booking.paid_amount <= 0 and not self.booking._has_money_in_flight()
         ):
+            foreign_adults, foreign_kids = self.foreign_pax
             breakdown = price_breakdown(
-                room_type, package, self.adult_count, self.kid_ages
+                room_type,
+                package,
+                self.adult_count,
+                self.kid_ages,
+                foreign_adults=foreign_adults,
+                foreign_kids=foreign_kids,
             )
             self.room_subtotal = breakdown["total"]
             self.price_snapshot = snapshot_breakdown(

@@ -15,10 +15,20 @@ from apps.packages.models import KidPricingRule
 ZERO = Decimal("0.00")
 
 
-def price_breakdown(room_type, package, adult_count, kid_ages):
+def price_breakdown(
+    room_type, package, adult_count, kid_ages, *, foreign_adults=0, foreign_kids=0
+):
     """Full price breakdown, every amount a Decimal.
 
-    Room total = base_price + (adults × adult_price) + Σ kid tier charges.
+    Room total = base_price + (adults × adult_price) + Σ kid tier charges
+                 + foreign-national surcharges.
+
+    `foreign_adults` / `foreign_kids` are the counts of guests already included
+    in adult_count / kid_ages who are foreign nationals — a SUBSET, not extra
+    people. Each pays a fixed per-person surcharge from the package on top of
+    their ordinary fare, so a foreign child on the free age tier still carries
+    the kid surcharge if one is configured. Callers pass the counts rather than
+    the guest list because pricing has no business reading passport data.
     """
     adults_subtotal = package.adult_price * adult_count
     # Load every kid-pricing tier ONCE, not one query per child: the rules are a
@@ -28,6 +38,11 @@ def price_breakdown(room_type, package, adult_count, kid_ages):
     rules = list(KidPricingRule.objects.all())
     kids = [{"age": age, "charge": kid_charge(age, package, rules)} for age in kid_ages]
     kids_subtotal = sum((kid["charge"] for kid in kids), ZERO)
+    adult_surcharge = package.foreigner_adult_surcharge or ZERO
+    kid_surcharge = package.foreigner_kid_surcharge or ZERO
+    foreigner_subtotal = (
+        adult_surcharge * foreign_adults + kid_surcharge * foreign_kids
+    )
     return {
         "room_base": room_type.base_price,
         "adult_price": package.adult_price,
@@ -35,18 +50,31 @@ def price_breakdown(room_type, package, adult_count, kid_ages):
         "adults_subtotal": adults_subtotal,
         "kids": kids,
         "kids_subtotal": kids_subtotal,
-        "total": room_type.base_price + adults_subtotal + kids_subtotal,
+        # Rates are carried alongside the counts so the invoice can print
+        # "2 × 3000" from the frozen snapshot alone — the package's rate is
+        # admin-editable and would otherwise drift away from what was charged.
+        "foreign_adult_count": foreign_adults,
+        "foreign_kid_count": foreign_kids,
+        "foreigner_adult_surcharge": adult_surcharge,
+        "foreigner_kid_surcharge": kid_surcharge,
+        "foreigner_subtotal": foreigner_subtotal,
+        "total": (
+            room_type.base_price + adults_subtotal + kids_subtotal + foreigner_subtotal
+        ),
     }
 
 
-def calculate_total(room_type, package, adult_count, kid_ages):
-    return price_breakdown(room_type, package, adult_count, kid_ages)["total"]
+def calculate_total(room_type, package, adult_count, kid_ages, **foreign):
+    return price_breakdown(room_type, package, adult_count, kid_ages, **foreign)[
+        "total"
+    ]
 
 
 def booking_price_breakdown(package, rooms):
     """Aggregate breakdown for a whole (multi-room) booking.
 
-    `rooms` is an iterable of dicts {"room": Room, "adult_count", "kid_ages"}.
+    `rooms` is an iterable of dicts {"room": Room, "adult_count", "kid_ages"}
+    with optional "foreign_adults" / "foreign_kids" counts.
     Returns each room's own breakdown (carrying its room_number so the caller
     can label it) plus the grand total the customer is charged — one payment,
     one invoice for the whole family.
@@ -56,7 +84,12 @@ def booking_price_breakdown(package, rooms):
     for entry in rooms:
         room = entry["room"]
         bd = price_breakdown(
-            room.room_type, package, entry["adult_count"], entry["kid_ages"]
+            room.room_type,
+            package,
+            entry["adult_count"],
+            entry["kid_ages"],
+            foreign_adults=entry.get("foreign_adults", 0),
+            foreign_kids=entry.get("foreign_kids", 0),
         )
         bd["room_number"] = room.room_number
         room_breakdowns.append(bd)
@@ -96,6 +129,13 @@ def snapshot_breakdown(breakdown, room_number=None):
             for kid in breakdown["kids"]
         ],
         "kids_subtotal": str(breakdown["kids_subtotal"]),
+        "foreign_adult_count": breakdown.get("foreign_adult_count", 0),
+        "foreign_kid_count": breakdown.get("foreign_kid_count", 0),
+        "foreigner_adult_surcharge": str(
+            breakdown.get("foreigner_adult_surcharge", ZERO)
+        ),
+        "foreigner_kid_surcharge": str(breakdown.get("foreigner_kid_surcharge", ZERO)),
+        "foreigner_subtotal": str(breakdown.get("foreigner_subtotal", ZERO)),
         "total": str(breakdown["total"]),
     }
     if room_number is not None:
@@ -105,7 +145,15 @@ def snapshot_breakdown(breakdown, room_number=None):
 
 def restore_breakdown(snapshot):
     """A room's price_snapshot → breakdown with Decimals back (inverse of
-    snapshot_breakdown). Returns None for an empty/absent snapshot."""
+    snapshot_breakdown). Returns None for an empty/absent snapshot.
+
+    Every foreigner key is read with a DEFAULT, never subscripted: snapshots
+    frozen before the foreign-national surcharge existed simply do not carry
+    them, and those bookings are paid, invoiced and still re-rendered on demand
+    (resend, regeneration after a redeploy). A KeyError here would 500 the
+    invoice of every pre-feature booking — the snapshot is a historical record,
+    so readers must tolerate older shapes forever.
+    """
     if not snapshot:
         return None
     return {
@@ -118,6 +166,15 @@ def restore_breakdown(snapshot):
             for kid in snapshot["kids"]
         ],
         "kids_subtotal": Decimal(snapshot["kids_subtotal"]),
+        "foreign_adult_count": snapshot.get("foreign_adult_count", 0),
+        "foreign_kid_count": snapshot.get("foreign_kid_count", 0),
+        "foreigner_adult_surcharge": Decimal(
+            snapshot.get("foreigner_adult_surcharge", "0.00")
+        ),
+        "foreigner_kid_surcharge": Decimal(
+            snapshot.get("foreigner_kid_surcharge", "0.00")
+        ),
+        "foreigner_subtotal": Decimal(snapshot.get("foreigner_subtotal", "0.00")),
         "total": Decimal(snapshot["total"]),
         "room_number": snapshot.get("room_number"),
     }

@@ -41,6 +41,11 @@ class PackageListSerializer(serializers.ModelSerializer):
             "nights",
             "days",
             "adult_price",
+            # Published so the booking wizard can tell a foreign guest what the
+            # surcharge will be BEFORE they fill in a passport — the quote still
+            # computes the actual money, this is only the advertised rate.
+            "foreigner_adult_surcharge",
+            "foreigner_kid_surcharge",
             "booking_cutoff_datetime",
             "is_bookable",
             "booking_status",

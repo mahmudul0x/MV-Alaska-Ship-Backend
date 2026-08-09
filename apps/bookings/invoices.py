@@ -175,10 +175,17 @@ def _invoice_email_html(invoice):
     # several cabins sees each one and its guests spelled out.
     for i, br in enumerate(rows, start=1):
         room_label = "Room" if len(rows) == 1 else f"Room {i}"
-        detail_pairs.append(
-            (room_label, f"{br.room.room_number} ({br.room.room_type.name}) — "
-                         f"{br.adult_count} adult(s), {len(br.kid_details)} kid(s)")
+        summary = (
+            f"{br.room.room_number} ({br.room.room_type.name}) — "
+            f"{br.adult_count} adult(s), {len(br.kid_details)} kid(s)"
         )
+        if br.foreign_guests:
+            summary += f", {len(br.foreign_guests)} foreign national(s)"
+        detail_pairs.append((room_label, summary))
+    # Passport numbers are NOT listed in the email body — email is unencrypted
+    # in transit and lands in inboxes we do not control. The attached PDF (and
+    # the manifest) carry them; here the customer only needs to see that the
+    # surcharge on their invoice corresponds to real guests.
     details = "".join(
         f'<tr style="border-bottom:1px solid #eef1f5;">'
         f"<td {label}>{escape(k)}</td><td {value}>{escape(str(v))}</td></tr>"
@@ -661,6 +668,25 @@ def generate_invoice_pdf(invoice):
             (f"    Kid fare (age {kid['age']})", kid["charge"])
             for kid in breakdown["kids"]
         )
+        # Foreign-national surcharge, itemised per fare type. Counts AND rates
+        # come from the frozen snapshot, so the line reads "2 × 3000" exactly as
+        # charged even after staff change the package's rate. Pre-feature
+        # snapshots restore these as 0 and print nothing.
+        if breakdown["foreign_adult_count"]:
+            charge_rows.append((
+                f"    Foreign national surcharge — adult "
+                f"({breakdown['foreign_adult_count']} × "
+                f"{breakdown['foreigner_adult_surcharge']})",
+                breakdown["foreigner_adult_surcharge"]
+                * breakdown["foreign_adult_count"],
+            ))
+        if breakdown["foreign_kid_count"]:
+            charge_rows.append((
+                f"    Foreign national surcharge — child "
+                f"({breakdown['foreign_kid_count']} × "
+                f"{breakdown['foreigner_kid_surcharge']})",
+                breakdown["foreigner_kid_surcharge"] * breakdown["foreign_kid_count"],
+            ))
     if not any_snapshot:
         # Pre-snapshot booking (or snapshots that never got written): the stored
         # total is still the money truth, so show it as a single line rather
@@ -669,6 +695,44 @@ def generate_invoice_pdf(invoice):
     for i, (desc, amount) in enumerate(charge_rows):
         table_row([(desc, desc_w, "L"), (f"{amount}", amt_w, "R")], shade=i % 2 == 0)
     pdf.ln(5)
+
+    # ── Foreign nationals ──────────────────────────────────────────────────
+    # Only drawn when the booking actually has foreign guests, so every
+    # domestic invoice — and every invoice issued before this feature — is
+    # byte-for-byte the document it was. Passports are printed IN FULL here:
+    # invoice PDFs live in the private bucket behind short-lived presigned
+    # URLs, and a foreign guest needs the document to match their passport for
+    # visa and reimbursement purposes.
+    foreign_rows = [
+        (br, guest)
+        for br in rooms
+        for guest in (br.foreign_guests or [])
+    ]
+    if foreign_rows:
+        n_w, p_w = epw * 0.30, epw * 0.22
+        c_w = epw * 0.16
+        r_w = epw - n_w - p_w - c_w
+        table_header(
+            "FOREIGN NATIONALS",
+            [
+                ("Guest", n_w, "L"),
+                ("Passport no.", p_w, "L"),
+                ("Nationality", c_w, "L"),
+                ("Cabin", r_w, "L"),
+            ],
+        )
+        for i, (br, guest) in enumerate(foreign_rows):
+            fare = "child" if guest.get("guest_type") == "kid" else "adult"
+            table_row(
+                [
+                    (guest.get("full_name") or f"Foreign {fare}", n_w, "L"),
+                    (guest.get("passport_number", "—"), p_w, "L"),
+                    (guest.get("nationality") or "—", c_w, "L"),
+                    (br.room.room_number, r_w, "L"),
+                ],
+                shade=i % 2 == 0,
+            )
+        pdf.ln(5)
 
     # ── Payments table ─────────────────────────────────────────────────────
     # Only payments that existed when this invoice was ISSUED. Otherwise a

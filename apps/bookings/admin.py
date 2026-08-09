@@ -12,7 +12,10 @@ class BookingRoomInline(admin.TabularInline):
     extra = 0
     can_delete = False
     # room/pax define the booking; the priced subtotal is computed server-side.
-    fields = ("room", "adult_count", "kid_details", "room_subtotal", "is_active")
+    fields = (
+        "room", "adult_count", "kid_details", "foreign_guests",
+        "room_subtotal", "is_active",
+    )
     readonly_fields = ("room_subtotal", "is_active")
 
     def has_add_permission(self, request, obj=None):

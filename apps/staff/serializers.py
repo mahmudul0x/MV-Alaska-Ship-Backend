@@ -427,6 +427,7 @@ class StaffPackageSerializer(serializers.ModelSerializer):
             "id", "ship", "ship_name", "start_date", "end_date",
             "booking_cutoff_datetime", "adult_price", "status", "is_booking_open",
             "min_deposit_percent", "balance_due_days_before_start",
+            "foreigner_adult_surcharge", "foreigner_kid_surcharge",
             "duration_days", "duration_nights", "effective_days", "effective_nights",
             "marketing_title", "marketing_description", "hero_image", "highlights",
             "bookings_count", "paid_total", "due_total", "rooms_total", "is_bookable",
@@ -462,6 +463,8 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         package.min_deposit_percent = value("min_deposit_percent")
         package.duration_days = value("duration_days")
         package.duration_nights = value("duration_nights")
+        package.foreigner_adult_surcharge = value("foreigner_adult_surcharge")
+        package.foreigner_kid_surcharge = value("foreigner_kid_surcharge")
         package.clean()
 
         # Changing the price of a sailing that already has bookings on it means
@@ -470,22 +473,35 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         # flight (QA C7), so their money is safe — but the two would silently
         # disagree, and the guide's collection sheet is printed from the
         # booking. Cancel-and-rebook is the honest path, so refuse the edit.
-        if self.instance and "adult_price" in attrs:
-            if attrs["adult_price"] != self.instance.adult_price:
+        #
+        # The foreigner surcharges are priced money on exactly the same terms —
+        # a foreign guest who booked at a 0 surcharge was quoted that, and their
+        # frozen snapshot would silently disagree with the package — so they are
+        # locked by the same rule.
+        priced_fields = (
+            ("adult_price", "price"),
+            ("foreigner_adult_surcharge", "foreign-adult surcharge"),
+            ("foreigner_kid_surcharge", "foreign-child surcharge"),
+        )
+        if self.instance:
+            for field, label in priced_fields:
+                if field not in attrs or attrs[field] == getattr(self.instance, field):
+                    continue
                 active = self.instance.bookings.exclude(
                     status=Booking.Status.CANCELLED
                 ).count()
                 if active:
                     raise serializers.ValidationError(
                         {
-                            "adult_price": (
+                            field: (
                                 f"This package has {active} active booking(s) — "
-                                "its price cannot be changed. Those customers were "
-                                "quoted the current price and their bookings hold "
-                                "it. Cancel and rebook them to re-price."
+                                f"its {label} cannot be changed. Those customers "
+                                "were quoted the current price and their bookings "
+                                "hold it. Cancel and rebook them to re-price."
                             )
                         }
                     )
+                break
 
         # Moving a package to another ship would leave the old ship's rooms
         # attached: the public rooms endpoint would sell cabins that are not
@@ -621,6 +637,10 @@ class StaffBookingRoomSerializer(serializers.ModelSerializer):
         model = BookingRoom
         fields = [
             "room", "room_number", "room_type", "adult_count", "kid_details",
+            # Full passport numbers, unlike the public confirmation view which
+            # masks them: this endpoint is behind staff authentication and the
+            # numbers are what staff transcribe for the port authority.
+            "foreign_guests",
             "room_subtotal", "is_active",
         ]
 
@@ -632,13 +652,17 @@ class StaffBookingListSerializer(serializers.ModelSerializer):
     # single string (the dashboard's booking list showed one room_number).
     room_number = serializers.SerializerMethodField()
     total_pax = serializers.IntegerField(read_only=True)
+    # How many of total_pax are foreign nationals — drives the dashboard's
+    # "FN" badge and the foreign-bookings filter without the list having to
+    # walk every cabin's guest JSON client-side.
+    foreign_pax_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = [
             "id", "booking_code", "customer_name", "phone", "email",
             "package", "package_title", "rooms", "room_number",
-            "total_pax", "special_requests",
+            "total_pax", "foreign_pax_count", "special_requests",
             "total_amount", "paid_amount", "due_amount", "status",
             "refund_required", "refund_note", "created_at",
         ]
@@ -648,6 +672,9 @@ class StaffBookingListSerializer(serializers.ModelSerializer):
 
     def get_room_number(self, booking):
         return ", ".join(br.room.room_number for br in booking.rooms.all())
+
+    def get_foreign_pax_count(self, booking):
+        return sum(len(br.foreign_guests or []) for br in booking.rooms.all())
 
 
 class StaffBookingDetailSerializer(StaffBookingListSerializer):

@@ -76,6 +76,27 @@ class Package(models.Model):
             "the deadline are cancelled and flagged for a manual refund call."
         ),
     )
+    # Foreign-national surcharge — a FIXED amount per foreign guest, on top of
+    # that guest's ordinary adult/kid fare. Per package (like adult_price) and
+    # admin-editable, never a constant in code. Default 0.00 so every existing
+    # sailing keeps pricing exactly as it did until staff set a rate.
+    foreigner_adult_surcharge = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Extra charge per foreign adult, on top of the adult fare.",
+    )
+    foreigner_kid_surcharge = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text=(
+            "Extra charge per foreign child, on top of that child's age-tier "
+            "fare. A child on a FREE age tier is still surcharged if set."
+        ),
+    )
     # Displayed duration ("3 Days · 2 Nights") for the public package card.
     # Both blank => auto-derived from the dates (nights = date span, days =
     # nights + 1), so a normal sailing needs no data entry. Staff may override
@@ -221,6 +242,16 @@ class Package(models.Model):
                     )
                 }
             )
+
+        # Surcharges are additive money — a negative one would DISCOUNT a
+        # foreign guest below the local fare, which is never the intent and
+        # would be invisible on the invoice (it prints as a charge line).
+        # Checked here as well as by the field validators because clean() is
+        # the gate every non-form path (staff API, admin, shell) goes through.
+        for field in ("foreigner_adult_surcharge", "foreigner_kid_surcharge"):
+            value = getattr(self, field)
+            if value is not None and value < 0:
+                raise ValidationError({field: "Surcharge cannot be negative."})
 
         # Duration overrides are optional, but if set they must be sane and
         # mutually consistent — a nights value ≥ days ("3 Days · 3 Nights")

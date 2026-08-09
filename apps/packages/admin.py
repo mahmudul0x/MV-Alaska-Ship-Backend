@@ -31,6 +31,20 @@ class PackageAdmin(admin.ModelAdmin):
             {"fields": ("status", "is_booking_open", "booking_cutoff_datetime")},
         ),
         (
+            "Foreign national surcharge",
+            {
+                "fields": (
+                    "foreigner_adult_surcharge",
+                    "foreigner_kid_surcharge",
+                ),
+                "description": (
+                    "Fixed extra charge per foreign guest, on top of that "
+                    "guest's ordinary adult/child fare. Leave at 0.00 to charge "
+                    "foreign nationals the same as local guests."
+                ),
+            },
+        ),
+        (
             "Displayed duration",
             {
                 "fields": ("duration_days", "duration_nights"),

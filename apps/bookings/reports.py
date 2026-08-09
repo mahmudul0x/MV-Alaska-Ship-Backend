@@ -249,6 +249,12 @@ def generate_guide_report_pdf(package, scope="booked"):
             name = booking.customer_name
             if is_group and r_idx == 0:
                 name = f"{name}  · {len(rooms)} rooms"
+            # Foreign nationals in THIS cabin. The guide checks passports on
+            # boarding, so the marker has to sit on the cabin row itself — the
+            # manifest at the end of the sheet is the detail, this is the
+            # "stop at this door" cue.
+            if br.foreign_guests:
+                name = f"{name}  · {len(br.foreign_guests)} FN"
             label_cells = [
                 (col["room"], f" {br.room.room_number}", "L"),
                 (col["name"], f" {name}", "L"),
@@ -375,6 +381,62 @@ def generate_guide_report_pdf(package, scope="booked"):
                 else "  Every room on this sailing is booked."
             )
             pdf.cell(epw, row_h, msg, new_x="LMARGIN", new_y="NEXT")
+
+    # ── Foreign nationals — immigration manifest ───────────────────────────
+    # Printed in BOTH scopes and only when the sailing actually carries foreign
+    # guests, so a domestic voyage's sheet is unchanged. Bangladeshi river
+    # cruises are asked for a foreign-passenger list at the port; the guide has
+    # no system access, so this printed block is that list. Passports appear in
+    # full — the sheet is an internal document handed to the authorities.
+    manifest = [
+        (br, guest)
+        for group in groups
+        for br in group["rooms"]
+        for guest in (br.foreign_guests or [])
+    ]
+    if manifest:
+        pdf.ln(4)
+        if pdf.get_y() > pdf.h - 50:
+            pdf.add_page()
+        pdf.set_font("NotoSans", "B", body_pt)
+        pdf.set_text_color(*NAVY)
+        pdf.cell(
+            epw, row_h,
+            f"Foreign nationals — {len(manifest)} "
+            f"guest{'s' if len(manifest) != 1 else ''}  ·  passport check on "
+            "boarding",
+            new_x="LMARGIN", new_y="NEXT",
+        )
+        m_room, m_pass, m_nat = col["room"], 34, 24
+        m_name = epw - m_room - m_pass - m_nat - 30
+        m_type = 30
+        pdf.set_font("NotoSans", "B", head_pt)
+        pdf.set_fill_color(*NAVY)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(m_room, row_h, " Room", fill=True)
+        pdf.cell(m_name, row_h, " Guest name", fill=True)
+        pdf.cell(m_pass, row_h, " Passport no.", fill=True)
+        pdf.cell(m_nat, row_h, " Nat.", fill=True)
+        pdf.cell(m_type, row_h, " Fare", fill=True, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_draw_color(*RULE)
+        for i, (br, guest) in enumerate(manifest):
+            fare = "Child" if guest.get("guest_type") == "kid" else "Adult"
+            pdf.set_font("NotoSans", "", body_pt)
+            pdf.set_text_color(40, 40, 40)
+            pdf.set_fill_color(*(ZEBRA if i % 2 == 0 else (255, 255, 255)))
+            pdf.cell(m_room, row_h, f" {br.room.room_number}", fill=True, border="B")
+            # Name is optional on a guest — the passport is the identifier, so
+            # a nameless row still works as a manifest line.
+            pdf.cell(m_name, row_h, f" {guest.get('full_name') or '—'}",
+                     fill=True, border="B")
+            pdf.set_font("NotoSans", "B", body_pt)
+            pdf.cell(m_pass, row_h, f" {guest.get('passport_number', '—')}",
+                     fill=True, border="B")
+            pdf.set_font("NotoSans", "", body_pt)
+            pdf.cell(m_nat, row_h, f" {guest.get('nationality') or '—'}",
+                     fill=True, border="B")
+            pdf.cell(m_type, row_h, f" {fare}", fill=True, border="B",
+                     new_x="LMARGIN", new_y="NEXT")
 
     # Authorized signature (right side, below the totals)
     pdf.ln(8)
