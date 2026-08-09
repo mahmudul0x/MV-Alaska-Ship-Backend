@@ -13,13 +13,17 @@ from datetime import timedelta
 from decimal import Decimal
 from itertools import count
 
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.files.base import ContentFile
 from django.utils import timezone
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
+from apps.bookings import invoice_access
 from apps.bookings.identity import normalize_booking_code
-from apps.bookings.models import Booking, Payment
+from apps.bookings.models import Booking, Invoice, Payment
 from apps.packages.models import KidPricingRule, Package, PackageRoom
 from apps.ships.models import Room, RoomType, Ship
 from apps.testing import ThrottlelessTestMixin, create_booking
@@ -863,3 +867,94 @@ class NotificationTests(ThrottlelessTestMixin, APITestCase):
         bodies = "\n".join(message.body for message in mail.outbox)
         self.assertIn("7600.00", bodies)
         self.assertIn("ending 5678", bodies)
+
+
+# ── Invoice download links ────────────────────────────────────────────────
+
+
+class InvoiceDownloadLinkTests(ThrottlelessTestMixin, APITestCase):
+    """The download URL is a signed, expiring link — not the invoice's
+    permanent access_token, which now never leaves the server."""
+
+    def setUp(self):
+        self.ship, self.package, self.room_a, self.room_b = build_world(
+            ship_name=unique("Invoice")
+        )
+        self.booking = make_booking(self.package, self.room_a, paid="8000.00")
+        self.invoice = Invoice.objects.create(
+            booking=self.booking,
+            total_amount=self.booking.total_amount,
+            paid_amount=self.booking.paid_amount,
+            due_amount=self.booking.due_amount,
+        )
+        self.invoice.pdf_file.save(
+            "x.pdf", ContentFile(b"%PDF-1.4 test"), save=True
+        )
+
+    def listed_url(self):
+        response = self.client.get(
+            f"/api/bookings/{self.booking.booking_code}/invoices/"
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.data[0]["download_url"]
+
+    def test_the_permanent_token_never_appears_in_the_link(self):
+        self.assertNotIn(self.invoice.access_token, self.listed_url())
+
+    def test_a_fresh_link_downloads_the_pdf_as_an_attachment(self):
+        response = APIClient().get(self.listed_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            b"".join(response.streaming_content).startswith(b"%PDF")
+        )
+        # Attachment, not inline: an inline PDF parks the token in the address
+        # bar and the browser history.
+        self.assertIn("attachment", response["Content-Disposition"])
+        self.assertIn("no-store", response["Cache-Control"])
+        self.assertEqual(response["Referrer-Policy"], "no-referrer")
+
+    def test_the_old_permanent_token_no_longer_opens_anything(self):
+        response = APIClient().get(
+            f"/api/invoices/{self.invoice.access_token}/download/"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_an_expired_link_is_refused_with_a_reason(self):
+        """A link that aged out is the one failure the holder did nothing to
+        cause, so it says so rather than 404-ing blankly."""
+        url = self.listed_url()
+        later = timezone.now() + timedelta(
+            seconds=invoice_access.MAX_AGE_SECONDS + 60
+        )
+        with patch("django.core.signing.time.time", return_value=later.timestamp()):
+            response = APIClient().get(url)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["code"], "link_expired")
+
+    def test_a_tampered_link_gets_a_blank_404(self):
+        url = self.listed_url()
+        tampered = f"{url[:-4]}zzzz/"
+        self.assertEqual(APIClient().get(tampered).status_code, 404)
+
+    def test_a_link_only_ever_serves_its_own_invoice(self):
+        """One customer's link must not reach another's document, and the
+        listing must not leak anyone else's."""
+        other = make_booking(self.package, self.room_b, paid="8000.00")
+        other_invoice = Invoice.objects.create(
+            booking=other,
+            total_amount=other.total_amount,
+            paid_amount=other.paid_amount,
+            due_amount=other.due_amount,
+        )
+        other_invoice.pdf_file.save("y.pdf", ContentFile(b"%PDF other"), save=True)
+
+        response = APIClient().get(self.listed_url())
+        body = b"".join(response.streaming_content)
+        self.assertIn(b"test", body)
+        self.assertNotIn(b"other", body)
+
+        listing = self.client.get(
+            f"/api/bookings/{self.booking.booking_code}/invoices/"
+        )
+        self.assertEqual(len(listing.data), 1)
+        self.assertEqual(listing.data[0]["number"], self.invoice.number)

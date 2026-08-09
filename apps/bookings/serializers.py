@@ -11,6 +11,7 @@ from apps.ships.models import Room
 from .exceptions import RoomUnavailable
 from .guests import clean_foreign_guests, guest_counts, mask_passport
 from .identity import normalize_booking_code, phone_digits
+from . import invoice_access
 from .models import Booking, BookingRoom, Invoice, Payment
 from .pricing import booking_price_breakdown, snapshot_booking_breakdown
 
@@ -355,9 +356,15 @@ class PaymentInitiateSerializer(serializers.Serializer):
 
 
 class BookingInvoiceSerializer(serializers.ModelSerializer):
-    """A customer-facing invoice listing. Exposes the download link (bearing
-    the invoice's own capability token) and the figures the invoice states —
-    never another booking's data."""
+    """A customer-facing invoice listing: a download link and the figures the
+    invoice states — never another booking's data.
+
+    The link is minted fresh on every read and expires in 30 minutes. The
+    invoice's permanent access_token is NOT what travels in it (see
+    apps.bookings.invoice_access): this endpoint is already authorised by the
+    booking code, so there is nothing to gain from also handing out a
+    credential that would still work next year.
+    """
 
     download_url = serializers.SerializerMethodField()
 
@@ -369,7 +376,9 @@ class BookingInvoiceSerializer(serializers.ModelSerializer):
         ]
 
     def get_download_url(self, invoice):
-        url = reverse("invoice-download", kwargs={"token": invoice.access_token})
+        url = reverse(
+            "invoice-download", kwargs={"token": invoice_access.issue(invoice)}
+        )
         request = self.context.get("request")
         return request.build_absolute_uri(url) if request else url
 

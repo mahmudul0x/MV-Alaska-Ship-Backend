@@ -3,6 +3,7 @@ from django.core.files.base import ContentFile
 from django.urls import reverse
 from django.utils.html import format_html
 
+from . import invoice_access
 from .invoices import generate_invoice_pdf, send_invoice_email
 from .models import Booking, BookingRoom, BookingStatusLog, Invoice, Payment
 
@@ -129,10 +130,15 @@ class InvoiceAdmin(admin.ModelAdmin):
     @admin.display(description="PDF")
     def pdf_link(self, invoice):
         if invoice.pdf_file:
-            # The token-bearing endpoint, not the raw media path (QA C1).
+            # The token-bearing endpoint, not the raw media path (QA C1). The
+            # token is signed and expires in 30 minutes, so an admin page left
+            # open (or its HTML saved) does not become a permanent key.
             return format_html(
                 '<a href="{}" target="_blank">Download</a>',
-                reverse("invoice-download", kwargs={"token": invoice.access_token}),
+                reverse(
+                    "invoice-download",
+                    kwargs={"token": invoice_access.issue(invoice)},
+                ),
             )
         return "—"
 

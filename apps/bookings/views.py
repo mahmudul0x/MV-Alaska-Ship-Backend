@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from . import payment_service, sslcommerz
+from . import invoice_access, payment_service, sslcommerz
 from .identity import normalize_booking_code, phone_last4_matches
 from .models import Booking, Invoice, Payment
 from .serializers import (
@@ -274,26 +274,54 @@ class BookingViewSet(
 
 
 class InvoiceDownloadView(APIView):
-    """Serve an invoice PDF against its capability token.
+    """Serve an invoice PDF against a signed, expiring download token.
 
-    Replaces the old raw MEDIA_URL link, which was served by
-    django.views.static.serve with no access check whatsoever and lived at a
-    path derivable from the booking code plus a sequential integer — so any
-    customer could enumerate everyone else's invoices (QA C1).
+    History: the PDF was once a raw MEDIA_URL link served by
+    django.views.static.serve with no access check at all, at a path derivable
+    from the booking code plus a sequential integer — so any customer could
+    enumerate everyone else's invoices (QA C1). That was replaced by the
+    invoice's permanent 256-bit access_token in the URL.
 
-    The token is 256 bits of entropy, is not derived from anything public, and
-    authorises exactly one invoice. It is what the customer's own emailed link
-    carries.
+    Now the URL carries a signed token that dies in 30 minutes, and the
+    permanent one never leaves the server (see apps.bookings.invoice_access for
+    why a never-expiring link to a document full of personal data is worth
+    closing). Links are minted per request by the booking's own invoices
+    endpoint, which is already authorised by the booking code.
     """
 
     def get(self, request, token):
-        invoice = get_object_or_404(Invoice, access_token=token)
+        try:
+            invoice_id = invoice_access.resolve_id(token)
+        except invoice_access.InvoiceLinkExpired:
+            # The holder did nothing wrong — a real link simply aged out — so
+            # say so instead of pretending the invoice does not exist.
+            return Response(
+                {
+                    "detail": (
+                        "This download link has expired. Open your booking "
+                        "again to get a fresh one."
+                    ),
+                    "code": "link_expired",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if invoice_id is None:
+            # Forged or mangled: the same blank 404 as a token for an invoice
+            # that was never there.
+            raise Http404("No such invoice.")
+
+        invoice = get_object_or_404(Invoice, pk=invoice_id)
         if not invoice.pdf_file:
             raise Http404("This invoice has no PDF.")
-        return FileResponse(
-            invoice.pdf_file.open("rb"),
-            content_type="application/pdf",
-            filename=f"{invoice.number}.pdf",
+        return invoice_access.harden(
+            FileResponse(
+                invoice.pdf_file.open("rb"),
+                content_type="application/pdf",
+                # Download it rather than rendering it in a tab, which would
+                # park the token in the address bar and the browser history.
+                as_attachment=True,
+                filename=f"{invoice.number}.pdf",
+            )
         )
 
 
