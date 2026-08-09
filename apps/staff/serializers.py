@@ -20,6 +20,7 @@ from apps.bookings.models import (
     Invoice,
     Payment,
 )
+from apps.bookings.public_links import public_absolute_uri
 from apps.bookings.serializers import BookingCreateSerializer
 from apps.packages.models import (
     ForeignerSurcharge,
@@ -833,5 +834,6 @@ class StaffInvoiceSerializer(serializers.ModelSerializer):
         if not invoice.pdf_file:
             return None
         url = reverse("staff-invoice-pdf", kwargs={"pk": invoice.pk})
-        request = self.context.get("request")
-        return request.build_absolute_uri(url) if request else url
+        # Same public origin as the customer's links, so the dashboard keeps
+        # working when /api is proxied through the website host.
+        return public_absolute_uri(url, self.context.get("request"))

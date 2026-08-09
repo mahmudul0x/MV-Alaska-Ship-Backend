@@ -18,6 +18,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.files.base import ContentFile
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
@@ -958,3 +959,14 @@ class InvoiceDownloadLinkTests(ThrottlelessTestMixin, APITestCase):
         )
         self.assertEqual(len(listing.data), 1)
         self.assertEqual(listing.data[0]["number"], self.invoice.number)
+
+    @override_settings(PUBLIC_API_BASE_URL="https://mvalaskacruise.example")
+    def test_links_are_built_on_the_public_origin_when_one_is_configured(self):
+        """A customer's document should carry the company's domain, not the
+        hosting provider's — and keep working when the backend moves."""
+        url = self.listed_url()
+        self.assertTrue(url.startswith("https://mvalaskacruise.example/api/invoices/"))
+        self.assertNotIn("onrender", url)
+
+    def test_without_a_public_origin_the_link_falls_back_to_the_request_host(self):
+        self.assertTrue(self.listed_url().startswith("http://testserver/api/invoices/"))
