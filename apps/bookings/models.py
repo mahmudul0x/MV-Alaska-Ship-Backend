@@ -1,4 +1,5 @@
 import secrets
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -198,6 +199,28 @@ class Booking(models.Model):
         # once its rooms exist. Booking-level validation (cutoff) is enforced at
         # the serializer.
         pass
+
+    def has_live_payment_session(self):
+        """True while a gateway session could still take the customer's money.
+
+        Deliberately NOT `_has_money_in_flight()`, which also counts SUCCESS —
+        that one exists to freeze pricing, and reusing it here would refuse to
+        cancel every booking that has ever paid.
+
+        Bounded by PAYMENT_SESSION_MINUTES. A PENDING row older than the
+        gateway's session lifetime can no longer settle (that is exactly what
+        reconcile_pending_payments closes it on), and that job does not run at
+        all on some hosting tiers — so without the bound one abandoned checkout
+        would lock a customer out of cancelling forever.
+        """
+        if not self.pk:
+            return False
+        cutoff = timezone.now() - timedelta(
+            minutes=getattr(settings, "PAYMENT_SESSION_MINUTES", 30)
+        )
+        return self.payments.filter(
+            status=Payment.Status.PENDING, created_at__gte=cutoff
+        ).exists()
 
     def _has_money_in_flight(self):
         """True if any gateway session has been handed out for this booking —

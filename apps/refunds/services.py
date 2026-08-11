@@ -385,6 +385,56 @@ def create_refund(
 
 
 @transaction.atomic
+def add_to_open_refund_or_create(booking, *, reason, amount, note, user=None):
+    """Fold more owed money into the booking's open payout, or start one.
+
+    Used when money arrives that nobody expected — a gateway session settling
+    after the booking was already cancelled. A second `create_refund` would hit
+    the one-open-refund-per-booking constraint and the amount would be lost to
+    a log line, so an existing PENDING row is increased instead and the change
+    is written to its status log.
+
+    Only a PENDING refund is ever topped up. Once a payout has been PAID it is
+    history: more money owed after that is a new row, never an edit.
+    """
+    booking = Booking.objects.select_for_update().get(pk=booking.pk)
+    amount = policy.q2(amount)
+    open_refund = booking.refunds.filter(status=Refund.Status.PENDING).first()
+    if open_refund is None:
+        return create_refund(
+            booking,
+            reason=reason,
+            amount=amount,
+            note=note,
+            user=user,
+            allow_outside_claim_window=True,
+        )
+
+    previous = open_refund.amount
+    increased = policy.q2(previous + amount)
+    if increased > booking.paid_amount:
+        raise ValidationError(
+            {
+                "amount": (
+                    f"Increasing this refund to {increased} would return more "
+                    f"than the {booking.paid_amount} BDT received."
+                )
+            }
+        )
+    open_refund.amount = increased
+    open_refund.note = f"{open_refund.note}\n{note}" if open_refund.note else note
+    open_refund.save(update_fields=["amount", "note", "updated_at"])
+    RefundStatusLog.objects.create(
+        refund=open_refund,
+        old_status=open_refund.status,
+        new_status=open_refund.status,
+        changed_by=user,
+        note=f"Increased from {previous} to {increased} BDT. {note}",
+    )
+    return open_refund
+
+
+@transaction.atomic
 def mark_refund_paid(refund, *, user, method, reference_no, note=""):
     """Record that the money actually went out.
 

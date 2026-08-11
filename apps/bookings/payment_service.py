@@ -76,6 +76,46 @@ def _flag_refund_owed(booking_id, note):
     booking.save(update_fields=["refund_required", "refund_note", "updated_at"])
 
 
+def _raise_refund_for_settled_on_cancelled(booking, payment, tran_id):
+    """Ledger entry for money that landed after the booking was cancelled.
+
+    An SSLCommerz session cannot be voided once handed out, so a customer can
+    still pay a checkout page belonging to a booking that has since been
+    cancelled — by the hold expiring, by staff, or by their own cancellation
+    request being approved. That money is ours to give back, and it has to be
+    visible where refunds are actually worked: the liability figure and the
+    register, not only a note on the booking.
+
+    Never raises. This runs inside the IPN transaction, and a bookkeeping
+    problem must not 500 the notification — SSLCommerz would retry forever and
+    the flag above has already recorded the condition either way.
+    """
+    from apps.refunds.models import Refund
+    from apps.refunds.services import add_to_open_refund_or_create
+
+    try:
+        # Folded into the booking's existing payout when there is one — a
+        # cancellation refund is usually already open, and a second row would
+        # collide with the one-open-refund-per-booking constraint.
+        add_to_open_refund_or_create(
+            booking,
+            reason=Refund.Reason.OVERPAYMENT,
+            amount=payment.amount,
+            note=(
+                f"Payment {tran_id} settled after this booking was cancelled. "
+                "Recorded automatically — the customer paid for a booking that "
+                "no longer exists."
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "Could not raise a refund row for %s on cancelled booking %s; "
+            "the refund_required flag still records it.",
+            tran_id,
+            booking.booking_code,
+        )
+
+
 def initiate_payment(booking, payment_type, amount=None):
     """Create a PENDING Payment and a gateway session; returns (payment, url).
 
@@ -295,6 +335,12 @@ def process_payment_result(tran_id, val_id):
                     "this booking was cancelled — the room may be resold. "
                     "Refund or rebook the customer manually.",
                 )
+                # And put it in the LEDGER, not just on the flag. This is money
+                # we are actually holding for a booking that no longer exists,
+                # so it has to appear in the refund liability figure and in the
+                # register that gets reconciled against the settlement report —
+                # a flag with a note appears in neither.
+                _raise_refund_for_settled_on_cancelled(booking, payment, tran_id)
                 logger.error(
                     "Payment %s settled on CANCELLED booking %s — refund or "
                     "rebook manually.",

@@ -386,6 +386,12 @@ class StaffBookingCancelView(APIView):
                 "shortfall_amount": str(quote.shortfall_amount),
                 "suggests_group": policy.suggests_group(booking),
                 "booking_type": booking.booking_type,
+                # Staff are warned, not blocked (the customer-facing flow is
+                # blocked outright). A live gateway session can still settle
+                # after this cancellation — SSLCommerz sessions cannot be
+                # voided — and that money would land as a further refund to
+                # send back, so whoever is on the phone should know.
+                "payment_in_progress": booking.has_live_payment_session(),
             }
         )
 

@@ -71,6 +71,7 @@ BLOCK_COMPLETED = "completed"
 BLOCK_IN_PROGRESS = "in_progress"
 BLOCK_SAILED = "sailed"
 BLOCK_PENDING_REQUEST = "pending_request"
+BLOCK_PAYMENT_IN_PROGRESS = "payment_in_progress"
 BLOCK_NO_POLICY = "no_policy"
 
 
@@ -221,6 +222,14 @@ def quote_cancellation(booking, *, today=None, ignore_pending=False):
         return blocked(BLOCK_SAILED)
     if not ignore_pending and booking.has_pending_cancellation:
         return blocked(BLOCK_PENDING_REQUEST)
+    # A live gateway session means money is on its way that paid_amount does not
+    # yet know about. Quoting now would tell a customer with 43,700 taka in
+    # flight that their refund is 0.00 — and an SSLCommerz session cannot be
+    # voided once handed out, so we cannot simply cancel around it. Make them
+    # finish or abandon the checkout first; abandoned ones close themselves
+    # within the session window.
+    if not ignore_pending and booking.has_live_payment_session():
+        return blocked(BLOCK_PAYMENT_IN_PROGRESS)
 
     rule = resolve_rule(package.ship, days_until_start)
     if rule is None:

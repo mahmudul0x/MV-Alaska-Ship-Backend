@@ -1006,3 +1006,180 @@ class PendingCancellationVisibilityTests(ThrottlelessTestMixin, APITestCase):
         )
         services.reject_cancellation(request, user=staff, note="Spoke to them.")
         self.assertIsNone(self.booking_payload()["pending_cancellation"])
+
+
+class PaymentInFlightTests(ThrottlelessTestMixin, APITestCase):
+    """Money on its way to the gateway, versus a cancellation.
+
+    An SSLCommerz session cannot be voided once handed out, so the two can
+    genuinely overlap; these pin down what happens when they do.
+    """
+
+    def setUp(self):
+        self.ship, self.package, self.room_a, self.room_b = build_world(
+            ship_name=unique("Flight")
+        )
+        self.booking = make_booking(self.package, self.room_a, paid="8000.00")
+
+    def open_session(self, booking=None, amount="4000.00", age_minutes=0):
+        payment = Payment.objects.create(
+            booking=booking or self.booking,
+            amount=Decimal(amount),
+            payment_type=Payment.PaymentType.PARTIAL,
+            status=Payment.Status.PENDING,
+            transaction_id=unique("TRX"),
+        )
+        if age_minutes:
+            Payment.objects.filter(pk=payment.pk).update(
+                created_at=timezone.now() - timedelta(minutes=age_minutes)
+            )
+        return payment
+
+    def test_a_live_session_blocks_the_customer_from_cancelling(self):
+        self.open_session()
+        quote = policy.quote_cancellation(self.booking)
+        self.assertFalse(quote.allowed)
+        self.assertEqual(quote.block_reason, policy.BLOCK_PAYMENT_IN_PROGRESS)
+
+    def test_the_public_endpoint_refuses_while_a_session_is_live(self):
+        self.open_session()
+        preview = self.client.get(
+            f"/api/bookings/{self.booking.booking_code}/cancellation-preview/"
+        )
+        self.assertFalse(preview.data["allowed"])
+        self.assertEqual(preview.data["block_reason"], "payment_in_progress")
+        self.assertIsNone(preview.data["quote_token"])
+
+    def test_an_abandoned_session_stops_blocking_once_it_can_no_longer_settle(self):
+        """Nothing can settle on a session older than the gateway's lifetime,
+        and the job that closes those does not run on every hosting tier — so
+        one abandoned checkout must not lock the customer out forever."""
+        self.open_session(age_minutes=120)
+        self.assertTrue(policy.quote_cancellation(self.booking).allowed)
+
+    def test_a_settled_payment_does_not_block(self):
+        """has_live_payment_session must not be _has_money_in_flight, which
+        counts SUCCESS too — that would refuse every paid booking."""
+        Payment.objects.create(
+            booking=self.booking,
+            amount=Decimal("8000.00"),
+            payment_type=Payment.PaymentType.FULL,
+            status=Payment.Status.SUCCESS,
+            transaction_id=unique("TRX"),
+        )
+        self.assertTrue(policy.quote_cancellation(self.booking).allowed)
+
+    def test_staff_are_warned_rather_than_blocked(self):
+        self.open_session()
+        staff = User.objects.create_user(
+            username=unique("desk"), password="pass12345", is_staff=True
+        )
+        self.client.force_authenticate(user=staff)
+        response = self.client.get(f"/api/staff/bookings/{self.booking.pk}/cancel/")
+        self.assertTrue(response.data["allowed"])
+        self.assertTrue(response.data["payment_in_progress"])
+
+
+class SettlementAfterCancellationTests(ThrottlelessTestMixin, APITestCase):
+    """Money that lands after the booking is already cancelled must reach the
+    refund LEDGER, not just the flag — the liability figure and the register
+    are what refunds are actually worked from."""
+
+    def setUp(self):
+        self.ship, self.package, self.room_a, self.room_b = build_world(
+            ship_name=unique("Late")
+        )
+
+    def settle_on_cancelled(self, booking, amount):
+        """What payment_service does when a gateway session settles on a
+        booking that has since been cancelled."""
+        from apps.bookings.payment_service import (
+            _raise_refund_for_settled_on_cancelled,
+        )
+
+        payment = Payment.objects.create(
+            booking=booking,
+            amount=Decimal(amount),
+            payment_type=Payment.PaymentType.PARTIAL,
+            status=Payment.Status.SUCCESS,
+            transaction_id=unique("TRX"),
+        )
+        booking.refresh_paid_amount()
+        _raise_refund_for_settled_on_cancelled(
+            booking, payment, payment.transaction_id
+        )
+        return payment
+
+    def test_raises_a_refund_when_the_booking_had_no_open_payout(self):
+        booking = make_booking(self.package, self.room_a)
+        booking.status = Booking.Status.CANCELLED
+        booking.save()
+
+        self.settle_on_cancelled(booking, "3000.00")
+
+        refund = Refund.objects.get(booking=booking)
+        self.assertEqual(refund.amount, Decimal("3000.00"))
+        self.assertEqual(refund.status, Refund.Status.PENDING)
+        self.assertEqual(refund.created_by, None)  # system-raised
+
+    def test_folds_into_the_open_payout_instead_of_colliding_with_it(self):
+        """The usual case: a cancellation refund is already open, and a second
+        row would violate one-open-refund-per-booking and lose the money."""
+        booking = make_booking(self.package, self.room_b)
+        # A REAL settled payment, not a faked paid_amount: refresh_paid_amount
+        # recomputes from Payment rows, so the deposit has to exist as one or
+        # the later settlement would wipe it out of the total.
+        Payment.objects.create(
+            booking=booking,
+            amount=Decimal("4000.00"),
+            payment_type=Payment.PaymentType.PARTIAL,
+            status=Payment.Status.SUCCESS,
+            transaction_id=unique("TRX"),
+        )
+        booking.refresh_paid_amount()
+        staff = User.objects.create_user(
+            username=unique("ops"), password="pass12345", is_staff=True
+        )
+        services.staff_cancel_booking(
+            booking,
+            user=staff,
+            reason_code=CancellationRequest.Reason.PLANS_CHANGED,
+            waive_charge=True,
+            reason_note="Goodwill.",
+        )
+        first = Refund.objects.get(booking=booking)
+        self.assertEqual(first.amount, Decimal("4000.00"))
+
+        booking.refresh_from_db()
+        self.settle_on_cancelled(booking, "2500.00")
+
+        self.assertEqual(Refund.objects.filter(booking=booking).count(), 1)
+        first.refresh_from_db()
+        self.assertEqual(first.amount, Decimal("6500.00"))
+        # The increase is auditable, not a silent overwrite.
+        self.assertTrue(first.status_logs.filter(note__icontains="Increased").exists())
+
+    def test_a_bookkeeping_failure_never_breaks_the_gateway_callback(self):
+        """SSLCommerz retries a failed IPN forever; a refund-row problem must
+        not be what makes it fail. The flag set alongside still records it."""
+        booking = make_booking(self.package, self.room_a)
+        booking.status = Booking.Status.CANCELLED
+        booking.save()
+        from apps.bookings.payment_service import (
+            _raise_refund_for_settled_on_cancelled,
+        )
+
+        payment = Payment.objects.create(
+            booking=booking,
+            amount=Decimal("1000.00"),
+            payment_type=Payment.PaymentType.PARTIAL,
+            status=Payment.Status.SUCCESS,
+            transaction_id=unique("TRX"),
+        )
+        with patch(
+            "apps.refunds.services.add_to_open_refund_or_create",
+            side_effect=RuntimeError("ledger is on fire"),
+        ):
+            # Must not raise.
+            _raise_refund_for_settled_on_cancelled(booking, payment, "TRX-BAD")
+        self.assertFalse(Refund.objects.filter(booking=booking).exists())
