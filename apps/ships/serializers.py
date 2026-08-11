@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from .imaging import thumbnail_url
 from .models import (
     Cabin,
     CabinImage,
@@ -20,10 +21,37 @@ class RoomTypeSerializer(serializers.ModelSerializer):
 
 class RoomImageSerializer(serializers.ModelSerializer):
     image = serializers.ImageField(read_only=True, use_url=True)
+    # A CDN-rendered small version, for previews that must not pull a megabyte
+    # per cabin (the deck-plan hover card fetches these as the mouse moves).
+    # Falls back to the full image off Cloudinary — see apps.ships.imaging.
+    thumbnail_url = serializers.SerializerMethodField()
 
     class Meta:
         model = RoomImage
-        fields = ["id", "image", "caption", "sort_order"]
+        fields = ["id", "image", "thumbnail_url", "caption", "sort_order"]
+
+    def get_thumbnail_url(self, image):
+        return thumbnail_url(image.image.url if image.image else "")
+
+
+class PreviewImageSerializer(serializers.Serializer):
+    """One image in a cabin preview, whatever model it came from.
+
+    A room's own photos and a cabin type's showcase photos are different models
+    with different extra fields; the preview only needs the three they share,
+    and emitting one shape means the UI has no branch to get wrong.
+    """
+
+    id = serializers.IntegerField(read_only=True)
+    image = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    caption = serializers.CharField(read_only=True)
+
+    def get_image(self, obj):
+        return obj.image.url if obj.image else ""
+
+    def get_thumbnail_url(self, obj):
+        return thumbnail_url(obj.image.url if obj.image else "")
 
 
 class RoomSerializer(serializers.ModelSerializer):

@@ -1,6 +1,10 @@
 from rest_framework import serializers
 
-from apps.ships.serializers import RoomImageSerializer, RoomTypeSerializer
+from apps.ships.serializers import (
+    PreviewImageSerializer,
+    RoomImageSerializer,
+    RoomTypeSerializer,
+)
 
 from .models import ForeignerSurcharge, KidPricingRule, Package, PackageRoom
 
@@ -109,6 +113,14 @@ class PackageRoomSerializer(serializers.ModelSerializer):
     floor_number = serializers.IntegerField(source="room.floor_number", read_only=True)
     room_type = RoomTypeSerializer(source="room.room_type", read_only=True)
     images = RoomImageSerializer(source="room.images", many=True, read_only=True)
+    # What to SHOW for this cabin, which is not always what was photographed
+    # for it. Rooms are photographed one by one and most never are, so a
+    # preview keyed strictly on `images` would be blank for most of the deck.
+    # These fall back to the showcase photos of the same room type, which are
+    # real pictures of an identical cabin — with `preview_source` saying so, so
+    # the UI can label them honestly rather than implying "this exact room".
+    preview_images = serializers.SerializerMethodField()
+    preview_source = serializers.SerializerMethodField()
     availability = serializers.SerializerMethodField()
 
     class Meta:
@@ -119,8 +131,29 @@ class PackageRoomSerializer(serializers.ModelSerializer):
             "floor_number",
             "room_type",
             "images",
+            "preview_images",
+            "preview_source",
             "availability",
         ]
+
+    def _cabin_images(self, package_room):
+        """Showcase photos for this room's type.
+
+        Read from a map built once by the view — resolving it per room would be
+        one query per cabin on a 31-cabin deck.
+        """
+        by_type = self.context.get("cabin_images_by_room_type") or {}
+        return by_type.get(package_room.room.room_type_id) or []
+
+    def get_preview_images(self, package_room):
+        own = list(package_room.room.images.all())
+        source = own or self._cabin_images(package_room)
+        return PreviewImageSerializer(source, many=True).data
+
+    def get_preview_source(self, package_room):
+        if package_room.room.images.all():
+            return "room"
+        return "room_type" if self._cabin_images(package_room) else None
 
     def get_availability(self, package_room):
         # An admin hold is surfaced to the public as "booked" — the room is

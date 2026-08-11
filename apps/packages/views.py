@@ -10,6 +10,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.bookings.models import BookingRoom
+from apps.ships.models import Cabin
 
 from .models import Package, PackageRoom
 from .serializers import (
@@ -17,6 +18,28 @@ from .serializers import (
     PackageListSerializer,
     PackageRoomSerializer,
 )
+
+
+def _cabin_images_by_room_type(ship):
+    """Showcase photos for this ship's cabin types, keyed by room type.
+
+    Built in ONE query and handed to the serializer, because the alternative is
+    a lookup per cabin — 31 extra queries on the availability endpoint, which is
+    the most-hit read in the whole app.
+
+    Only active cabins count: an inactive one is hidden from the showcase pages,
+    so it should not quietly reappear as a booking preview.
+    """
+    cabins = (
+        Cabin.objects.filter(ship=ship, is_active=True)
+        .prefetch_related("images")
+        .order_by("sort_order", "id")
+    )
+    by_type = {}
+    for cabin in cabins:
+        # First active cabin of a type wins; ordering above makes that stable.
+        by_type.setdefault(cabin.room_type_id, list(cabin.images.all()))
+    return by_type
 
 
 class PackageViewSet(viewsets.ReadOnlyModelViewSet):
@@ -55,7 +78,21 @@ class PackageViewSet(viewsets.ReadOnlyModelViewSet):
             .annotate(is_booked=Exists(active_booking))
             .order_by("room__floor_number", "room__room_number")
         )
-        serializer = PackageRoomSerializer(package_rooms, many=True)
+        rooms = list(package_rooms)
+        # Only reach for the room-type fallback when some cabin actually lacks
+        # its own photos. `room.images.all()` is prefetched above, so deciding
+        # this costs nothing, and a fully photographed deck pays no extra query
+        # at all. This is the app's most-hit read.
+        needs_fallback = any(not pr.room.images.all() for pr in rooms)
+        serializer = PackageRoomSerializer(
+            rooms,
+            many=True,
+            context={
+                "cabin_images_by_room_type": (
+                    _cabin_images_by_room_type(package.ship) if needs_fallback else {}
+                )
+            },
+        )
         return Response(serializer.data)
 
 

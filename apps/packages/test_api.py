@@ -35,7 +35,13 @@ ROOM_FIELDS = {
     "room_number",
     "floor_number",
     "room_type",
+    # This cabin's own photos...
     "images",
+    # ...and what to actually SHOW for it, which falls back to the showcase
+    # photos of the same cabin type when it has none of its own. preview_source
+    # says which, so the UI never implies another cabin's photo is this room.
+    "preview_images",
+    "preview_source",
     "availability",
 }
 
@@ -184,9 +190,10 @@ class PackageRoomsApiTests(PackageApiTestCase):
 
     def test_rooms_endpoint_query_count_is_constant(self):
         # One query for the package, one annotated query for all rooms, one
-        # prefetch for all rooms' gallery images — regardless of room count
-        # (N+1 guard).
-        with self.assertNumQueries(3):
+        # prefetch for all rooms' gallery images, and one lookup of the
+        # showcase cabins that unphotographed rooms borrow preview photos from
+        # — regardless of room count (N+1 guard).
+        with self.assertNumQueries(4):
             self.client.get(f"/api/packages/{self.package.id}/rooms/")
 
 

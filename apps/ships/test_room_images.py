@@ -62,7 +62,8 @@ class RoomImageTestCase(ThrottlelessTestMixin, APITestCase):
         self.assertEqual(images[0]["caption"], "Window view")
         for img in images:
             self.assertEqual(
-                set(img.keys()), {"id", "image", "caption", "sort_order"}
+                set(img.keys()),
+                {"id", "image", "thumbnail_url", "caption", "sort_order"},
             )
             self.assertTrue(img["image"], "each image must carry a usable URL")
 
