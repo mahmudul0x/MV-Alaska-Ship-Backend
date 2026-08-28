@@ -29,6 +29,10 @@ PACKAGE_LIST_FIELDS = {
     "marketing_description",
     "hero_image",
     "highlights",
+    # Inventory the homepage card advertises ("29 cabins free"), counted by the
+    # same rule the deck plan paints tiles with so the two cannot disagree.
+    "cabins_total",
+    "cabins_free",
 }
 ROOM_FIELDS = {
     "id",

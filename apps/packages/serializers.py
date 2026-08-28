@@ -6,6 +6,7 @@ from apps.ships.serializers import (
     RoomTypeSerializer,
 )
 
+from .inventory import count_free_cabins
 from .models import ForeignerSurcharge, KidPricingRule, Package, PackageRoom
 
 
@@ -40,6 +41,13 @@ class PackageListSerializer(serializers.ModelSerializer):
     foreigner_kid_surcharge = serializers.SerializerMethodField()
 
     hero_image = serializers.ImageField(read_only=True, use_url=True)
+    # Cabin inventory, as a customer counts it: how many are still bookable and
+    # how many the sailing has at all. Annotated on the queryset (see
+    # PackageViewSet.get_queryset) rather than counted per package, so a list of
+    # sailings stays one query. Read with getattr so the serializer still works
+    # on a plain Package — the staff dashboard and tests build those directly.
+    cabins_total = serializers.SerializerMethodField()
+    cabins_free = serializers.SerializerMethodField()
 
     class Meta:
         model = Package
@@ -63,7 +71,21 @@ class PackageListSerializer(serializers.ModelSerializer):
             "marketing_description",
             "hero_image",
             "highlights",
+            "cabins_total",
+            "cabins_free",
         ]
+
+    def get_cabins_total(self, package):
+        annotated = getattr(package, "cabins_total", None)
+        if annotated is not None:
+            return annotated
+        return package.package_rooms.filter(is_available=True).count()
+
+    def get_cabins_free(self, package):
+        annotated = getattr(package, "cabins_free", None)
+        if annotated is not None:
+            return annotated
+        return count_free_cabins(package)
 
     def get_nights(self, package):
         return package.effective_nights()

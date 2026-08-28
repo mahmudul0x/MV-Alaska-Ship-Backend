@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 from apps.bookings.models import BookingRoom
 from apps.ships.models import Cabin
 
+from .inventory import with_cabin_counts
 from .models import Package, PackageRoom
 from .serializers import (
     PackageDetailSerializer,
@@ -54,7 +55,9 @@ class PackageViewSet(viewsets.ReadOnlyModelViewSet):
     throttle_scope = "read"
 
     def get_queryset(self):
-        return Package.objects.public().select_related("ship").order_by("start_date")
+        return with_cabin_counts(
+            Package.objects.public().select_related("ship")
+        ).order_by("start_date")
 
     def get_serializer_class(self):
         if self.action == "retrieve":
