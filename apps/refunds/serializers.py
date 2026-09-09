@@ -116,9 +116,17 @@ class CancellationRequestCreateSerializer(serializers.Serializer):
         method = attrs["refund_method"]
         number = attrs["refund_account_number"].strip()
 
-        if booking.paid_amount <= 0:
-            # Nothing to send back. Drop whatever was posted rather than storing
-            # a payout destination for a payout that will never exist.
+        if booking.paid_amount <= 0 or not method:
+            # Two cases, one outcome — store no payout destination.
+            #
+            # Nothing paid: there will be no payout at all.
+            #
+            # Nothing chosen: the refund goes back through the gateway to the
+            # card or wallet the customer actually paid with. That is the
+            # default now, and it is the better one — the money lands where it
+            # came from, so it cannot be sent to a mistyped account, and we do
+            # not have to hold anyone's bank details to do it. The fields below
+            # exist only for a customer who asks to be paid somewhere else.
             attrs["refund_method"] = ""
             attrs["refund_account_number"] = ""
             attrs["refund_account_name"] = ""
@@ -126,10 +134,9 @@ class CancellationRequestCreateSerializer(serializers.Serializer):
             attrs["branch_name"] = ""
             return attrs
 
-        if not method:
-            raise serializers.ValidationError(
-                {"refund_method": "Tell us how you would like the refund sent."}
-            )
+        # An alternative destination WAS chosen, so it has to be complete —
+        # a half-filled one is worse than none, because staff would send money
+        # somewhere on the strength of it.
         if not attrs["refund_account_name"].strip():
             raise serializers.ValidationError(
                 {"refund_account_name": "Enter the account holder's name."}

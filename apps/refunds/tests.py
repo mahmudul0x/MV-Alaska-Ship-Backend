@@ -1183,3 +1183,97 @@ class SettlementAfterCancellationTests(ThrottlelessTestMixin, APITestCase):
             # Must not raise.
             _raise_refund_for_settled_on_cancelled(booking, payment, "TRX-BAD")
         self.assertFalse(Refund.objects.filter(booking=booking).exists())
+
+
+class GatewayReturnByDefaultTests(ThrottlelessTestMixin, APITestCase):
+    """A refund goes back the way the money came unless the customer asks
+    otherwise.
+
+    That is safer than collecting an account number — the money cannot be
+    mistyped into a stranger's wallet — and it means we hold no bank details we
+    do not need.
+    """
+
+    def setUp(self):
+        self.ship, self.package, self.room_a, self.room_b = build_world(
+            ship_name=unique("Return")
+        )
+        self.booking = make_booking(self.package, self.room_a, paid="8000.00")
+        self.staff = User.objects.create_user(
+            username=unique("ops"), password="pass12345", is_staff=True
+        )
+
+    def submit(self, **payout):
+        preview = self.client.get(
+            f"/api/bookings/{self.booking.booking_code}/cancellation-preview/"
+        )
+        body = {
+            "phone_confirm": self.booking.phone[-4:],
+            "reason_code": "plans_changed",
+            "acknowledged_charge": True,
+            "quote_token": preview.data["quote_token"],
+        }
+        body.update(payout)
+        return self.client.post(
+            f"/api/bookings/{self.booking.booking_code}/cancellation-request/",
+            body,
+            format="json",
+        )
+
+    def test_no_payout_details_are_required(self):
+        """The common path: the customer fills in nothing but a reason."""
+        self.assertEqual(self.submit().status_code, 201)
+        request = CancellationRequest.objects.get()
+        self.assertEqual(request.refund_method, "")
+        self.assertEqual(request.refund_account_number, "")
+
+    def test_approving_one_raises_a_gateway_refund(self):
+        self.submit()
+        services.approve_cancellation(
+            CancellationRequest.objects.get(), user=self.staff
+        )
+        refund = Refund.objects.get()
+        self.assertEqual(refund.method, Refund.Method.GATEWAY)
+        self.assertEqual(refund.account_number, "")
+
+    def test_an_alternative_destination_is_honoured_when_given(self):
+        response = self.submit(
+            refund_method="bkash",
+            refund_account_name="Rahim Uddin",
+            refund_account_number="01712345678",
+        )
+        self.assertEqual(response.status_code, 201)
+        services.approve_cancellation(
+            CancellationRequest.objects.get(), user=self.staff
+        )
+        refund = Refund.objects.get()
+        self.assertEqual(refund.method, Refund.Method.BKASH)
+        self.assertEqual(refund.account_number, "01712345678")
+
+    def test_an_incomplete_alternative_is_rejected(self):
+        """Worse than none: staff would send money on the strength of it."""
+        missing_name = self.submit(
+            refund_method="bkash", refund_account_number="01712345678"
+        )
+        self.assertEqual(missing_name.status_code, 400)
+        self.assertIn("refund_account_name", missing_name.data)
+
+        bad_number = self.submit(
+            refund_method="bkash",
+            refund_account_name="Rahim Uddin",
+            refund_account_number="12345",
+        )
+        self.assertEqual(bad_number.status_code, 400)
+        self.assertIn("refund_account_number", bad_number.data)
+
+    def test_the_email_explains_where_a_gateway_refund_goes(self):
+        self.submit()
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            services.approve_cancellation(
+                CancellationRequest.objects.get(), user=self.staff
+            )
+        body = "\n".join(m.body for m in mail.outbox)
+        self.assertIn("card or mobile wallet you paid", body)
+        # The bank's own leg is named too, or they phone a week later.
+        self.assertIn("5 to 7 working days", body)

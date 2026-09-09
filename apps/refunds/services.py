@@ -146,7 +146,9 @@ def approve_cancellation(request, *, user, note=""):
             cancellation_charge=request.cancellation_charge,
             policy_snapshot=request.policy_snapshot,
             cancellation_request=request,
-            method=request.refund_method,
+            # No destination asked for means "back the way I paid", which is a
+            # gateway reversal. Staff can still change it when they settle.
+            method=request.refund_method or Refund.Method.GATEWAY,
             account_name=request.refund_account_name,
             account_number=request.refund_account_number,
             bank_name=request.bank_name,

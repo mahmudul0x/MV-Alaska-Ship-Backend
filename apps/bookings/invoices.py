@@ -337,6 +337,17 @@ def _cancellation_money_paragraph(booking, paid):
             f"ending {refund.account_number[-4:]} within {sla_days} working "
             "days.\n\n"
         )
+    elif refund.method == Refund.Method.GATEWAY:
+        # The ordinary case now: the money is reversed to whatever the
+        # customer paid with. Saying so removes the "where will it go?"
+        # phone call, and naming the bank's own leg stops the second one a
+        # week later.
+        body += (
+            "This will be returned to the card or mobile wallet you paid "
+            f"with. We start the refund within {sla_days} working days, "
+            "and your bank or wallet provider usually posts it within a "
+            "further 5 to 7 working days.\n\n"
+        )
     else:
         body += (
             f"Our team will contact you on {booking.phone} to arrange the "
