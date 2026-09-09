@@ -1275,5 +1275,10 @@ class GatewayReturnByDefaultTests(ThrottlelessTestMixin, APITestCase):
             )
         body = "\n".join(m.body for m in mail.outbox)
         self.assertIn("card or mobile wallet you paid", body)
-        # The bank's own leg is named too, or they phone a week later.
-        self.assertIn("5 to 7 working days", body)
+        # One end-to-end figure, and it says so — the earlier wording quoted
+        # our own leg and then added the bank's on top, which reads as a
+        # moving target and puts the total past the timeline SSLCommerz
+        # require a merchant to publish.
+        sla = self.package.ship.refund_sla_days
+        self.assertIn(f"within {sla} working days", body)
+        self.assertIn("bank or wallet provider's own processing", body)

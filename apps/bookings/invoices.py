@@ -344,9 +344,9 @@ def _cancellation_money_paragraph(booking, paid):
         # week later.
         body += (
             "This will be returned to the card or mobile wallet you paid "
-            f"with. We start the refund within {sla_days} working days, "
-            "and your bank or wallet provider usually posts it within a "
-            "further 5 to 7 working days.\n\n"
+            f"with, and reaches you within {sla_days} working days. That "
+            "window covers your bank or wallet provider's own processing as "
+            "well as ours.\n\n"
         )
     else:
         body += (

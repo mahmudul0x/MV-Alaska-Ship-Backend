@@ -57,10 +57,14 @@ class Ship(models.Model):
         ),
     )
     refund_sla_days = models.PositiveSmallIntegerField(
-        default=14,
+        default=10,
         help_text=(
-            "Working days quoted to the customer for a refund payout. Drives "
-            "the promise in the cancellation email and the overdue-refund alert."
+            "Working days quoted to the customer as the outside limit for a "
+            "refund to reach them — end to end, not just our own leg. Drives "
+            "the promise in the cancellation email and the overdue-refund "
+            "alert. SSLCommerz require a published standard timeline of 7 to "
+            "10 working days, so do not raise this above 10 without checking "
+            "the merchant terms."
         ),
     )
     refund_claim_window_days = models.PositiveSmallIntegerField(
