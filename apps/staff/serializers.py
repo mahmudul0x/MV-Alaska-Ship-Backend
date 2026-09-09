@@ -453,6 +453,13 @@ class StaffPackageSerializer(serializers.ModelSerializer):
     # duration_nights below are the override knobs (blank = auto).
     effective_days = serializers.SerializerMethodField()
     effective_nights = serializers.SerializerMethodField()
+    # Declared rather than left to ModelSerializer so it can be cleared: the
+    # public cards fall back to a stock photograph when this is empty, and
+    # staff who picked the wrong picture need a way back to that. Uploading is
+    # a multipart PATCH; clearing is `null`.
+    hero_image = serializers.ImageField(
+        required=False, allow_null=True, use_url=True
+    )
 
     class Meta:
         model = Package
@@ -547,6 +554,15 @@ class StaffPackageSerializer(serializers.ModelSerializer):
                     }
                 )
         return attrs
+
+    def update(self, instance, validated_data):
+        # An explicit null on hero_image means "remove the picture". The column
+        # is not nullable — the model says blank=True, not null=True — so it is
+        # stored as the empty string, which is what the public serializer and
+        # the cards already read as "no image, use the stock one".
+        if validated_data.get("hero_image", "") is None:
+            validated_data["hero_image"] = ""
+        return super().update(instance, validated_data)
 
 
 class StaffPaymentSerializer(serializers.ModelSerializer):
