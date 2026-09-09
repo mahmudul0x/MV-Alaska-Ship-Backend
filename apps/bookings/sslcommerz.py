@@ -15,6 +15,26 @@ class GatewayError(Exception):
     """Session creation or validation could not be completed."""
 
 
+#: Field lengths the gateway documents for the session request. Ours are wider
+#: (customer_name is 100, EmailField is 254), so a long name or address would be
+#: sent oversized and the session refused — the customer seeing only "couldn't
+#: start payment", with nothing to act on and nothing in the logs to explain it.
+_MAX_CUS_NAME = 50
+MAX_CUS_EMAIL = 50
+_MAX_CUS_PHONE = 20
+
+
+def _fit(value, limit):
+    """Trim a display field to what the gateway accepts.
+
+    Only for fields the gateway shows on its own receipt. Never use this on an
+    email or anything else where a truncated value is a WRONG value rather than
+    a shortened one.
+    """
+    text = str(value or "").strip()
+    return text[:limit]
+
+
 #: Cardholder-data fields SSLCommerz returns that we neither use nor want to
 #: persist. The PAN is already masked by the gateway (PCI), but we still keep no
 #: card data at rest: it is surfaced to every staff user via the payment API and
@@ -57,9 +77,13 @@ def create_session(payment):
         "fail_url": f"{settings.BACKEND_URL}/api/payments/fail/",
         "cancel_url": f"{settings.BACKEND_URL}/api/payments/cancel/",
         "ipn_url": f"{settings.BACKEND_URL}/api/payments/ipn/",
-        "cus_name": booking.customer_name,
+        # Name is a label on the gateway's receipt, so trimming it loses
+        # nothing that matters. Email is NOT trimmed — a shortened address is
+        # simply the wrong address — so an over-long one is rejected up front
+        # with an explanation instead (see initiate_payment).
+        "cus_name": _fit(booking.customer_name, _MAX_CUS_NAME),
         "cus_email": booking.email,
-        "cus_phone": booking.phone,
+        "cus_phone": _fit(booking.phone, _MAX_CUS_PHONE),
         "cus_add1": "N/A",
         "cus_city": "N/A",
         "cus_country": "Bangladesh",
@@ -150,7 +174,11 @@ def verify_ipn_signature(data):
     keys = [key for key in str(verify_key).split(",") if key]
     if not keys:
         return False
-    pairs = {key: str(data.get(key, "")) for key in keys}
+    # Only keys actually PRESENT in the notification, matching the reference
+    # implementation's `isset($_POST[$value])`. Substituting "" for an absent
+    # key produced a different hash from the gateway's and would have rejected
+    # a genuine IPN as forged — silently, and with the payment left PENDING.
+    pairs = {key: str(data[key]) for key in keys if key in data}
     pairs["store_passwd"] = hashlib.md5(
         settings.SSLCOMMERZ_STORE_PASSWORD.encode()
     ).hexdigest()

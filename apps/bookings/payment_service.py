@@ -228,6 +228,22 @@ def initiate_payment(booking, payment_type, amount=None):
                 }
             )
 
+        # The gateway caps cus_email at 50 characters and rejects the session
+        # outright above that. Truncating is not an option — a shortened address
+        # is the wrong address, and the gateway emails its own receipt to it —
+        # so say so here, where the customer can still do something about it.
+        if len(booking.email) > sslcommerz.MAX_CUS_EMAIL:
+            raise ValidationError(
+                {
+                    "payment_type": (
+                        "Our payment gateway cannot accept an email address "
+                        f"longer than {sslcommerz.MAX_CUS_EMAIL} characters. "
+                        "Please contact us and we will update your booking to a "
+                        "shorter address before you pay."
+                    )
+                }
+            )
+
         live = booking.payments.filter(status=Payment.Status.PENDING).first()
         if live is not None:
             if (
@@ -347,6 +363,28 @@ def process_payment_result(tran_id, val_id):
             logger.warning("Rejected gateway verdict for %s: %s", tran_id, data)
             payment.status = Payment.Status.FAILED
         payment.gateway_payload = data
+        payment.gateway_risk_level = _risk_level(data)
+
+        # SSLCommerz's own fraud check. Their documentation is explicit: on
+        # risk_level 1, "hold the service and proceed to collect customer
+        # verification documents". The money is real and stays credited — a
+        # cruise is delivered weeks later, so what is actually held is the
+        # boarding, and that only works if a human is told before the sailing.
+        if payment.status == Payment.Status.SUCCESS and payment.is_risky:
+            payment.needs_manual_review = True
+            payment.last_reconcile_error = (
+                f"{timezone.now():%Y-%m-%d %H:%M} — Gateway flagged this "
+                f"payment as high risk (risk_title="
+                f"{data.get('risk_title') or 'unknown'}). Verify the "
+                "customer's identity before they board; do not treat this "
+                "booking as settled until you have."
+            )
+            logger.error(
+                "Payment %s on booking %s flagged HIGH RISK by the gateway — "
+                "verify the customer before departure.",
+                tran_id,
+                payment.booking.booking_code,
+            )
         payment.save()  # SUCCESS → booking paid/due/status refresh (SUM-based)
 
         if payment.status == Payment.Status.SUCCESS:
@@ -386,6 +424,22 @@ def process_payment_result(tran_id, val_id):
                     lambda: invoices.create_and_send_invoice(booking, payment=settled)
                 )
     return payment
+
+
+def _risk_level(data):
+    """The gateway's risk score as an int, or None when it did not say.
+
+    Arrives as a string ("0"/"1"); anything unparseable is treated as unknown
+    rather than as safe — a malformed score must not silently read as 0.
+    """
+    raw = data.get("risk_level")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("Unparseable risk_level from gateway: %r", raw)
+        return None
 
 
 def _verdict_is_valid(payment, tran_id, data):

@@ -374,9 +374,18 @@ class PaymentIPNView(APIView):
         ipn_status = request.data.get("status")
 
         try:
-            if ipn_status in ("FAILED",):
+            # Everything the gateway can tell us that means "no money moved"
+            # has to close the session here. Anything left PENDING keeps its
+            # cabin out of inventory until the reconciliation job clears it —
+            # and that job does not run on every hosting tier.
+            #
+            # UNATTEMPTED is the one that used to slip through: it carries no
+            # val_id, so it fell to process_payment_result and did nothing at
+            # all. The gateway defines it as "customer did not choose to pay
+            # any channel", which is an abandoned checkout — CANCELLED.
+            if ipn_status in ("FAILED", "EXPIRED"):
                 payment_service.mark_payment_closed(tran_id, Payment.Status.FAILED)
-            elif ipn_status in ("CANCELLED",):
+            elif ipn_status in ("CANCELLED", "UNATTEMPTED"):
                 payment_service.mark_payment_closed(tran_id, Payment.Status.CANCELLED)
             else:
                 payment_service.process_payment_result(tran_id, val_id)

@@ -568,6 +568,9 @@ class StaffPaymentSerializer(serializers.ModelSerializer):
             # inventory until a human settles it — staff must be able to see
             # and act on it, not just find it in a log stream (QA H5).
             "needs_manual_review", "reconcile_attempts", "last_reconcile_error",
+            # The gateway's fraud verdict, so the review queue shows WHY a
+            # settled payment is sitting in it.
+            "gateway_risk_level",
             "last_reconcile_at",
         ]
         read_only_fields = [

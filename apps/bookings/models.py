@@ -625,6 +625,13 @@ class Payment(models.Model):
     reconcile_attempts = models.PositiveSmallIntegerField(default=0)
     last_reconcile_error = models.TextField(blank=True)
     needs_manual_review = models.BooleanField(default=False)
+    #: The gateway's own fraud assessment of this transaction (0 safe, 1 risky).
+    #: SSLCommerz's documentation is explicit that a merchant must "hold the
+    #: service and proceed to collect customer verification documents" when it
+    #: comes back 1 — so it is stored as queryable state, not left buried in
+    #: gateway_payload where nobody would ever look at it. Null for payments
+    #: that never reached validation, and for rows created before this existed.
+    gateway_risk_level = models.PositiveSmallIntegerField(null=True, blank=True)
     # When the gateway was last asked about this payment. Escalated payments
     # are retried on a slow back-off rather than abandoned (QA H7) — a gateway
     # outage ends, and a payment we stop asking about holds its cabin out of
@@ -667,6 +674,15 @@ class Payment(models.Model):
                 name="payment_amount_positive",
             ),
         ]
+
+    @property
+    def is_risky(self):
+        """The gateway flagged this payment as high risk.
+
+        The money is real and stays credited; what is withheld is trust in it
+        until a human has checked the customer.
+        """
+        return self.gateway_risk_level == 1
 
     def __str__(self):
         return f"{self.booking.booking_code}: {self.amount} ({self.status})"
