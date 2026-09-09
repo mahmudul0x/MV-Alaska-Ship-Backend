@@ -38,6 +38,9 @@ BOOKING_PUBLIC_FIELDS = {
     # this is the only way the page can tell that the customer already asked —
     # without it they see an unchanged booking and a live "Cancel" button.
     "pending_cancellation",
+    # The gateway's per-transaction ceiling, so the wizard can cap the amount
+    # box instead of letting the redirect fail.
+    "max_online_payment",
 }
 
 

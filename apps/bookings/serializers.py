@@ -466,6 +466,10 @@ class BookingPublicSerializer(serializers.ModelSerializer):
     # unchanged booking with a live "Cancel" button, conclude the request never
     # went through, and either send it again or phone in.
     pending_cancellation = serializers.SerializerMethodField()
+    # The gateway's per-transaction ceiling, published so the wizard can cap the
+    # amount box and explain BEFORE someone tries — a large group booking really
+    # does exceed it, and the gateway only says so after the redirect.
+    max_online_payment = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -486,7 +490,13 @@ class BookingPublicSerializer(serializers.ModelSerializer):
             "balance_due_at",
             "balance_deadline_passed",
             "pending_cancellation",
+            "max_online_payment",
         ]
+
+    def get_max_online_payment(self, booking):
+        from django.conf import settings
+
+        return str(settings.SSLCOMMERZ_MAX_AMOUNT)
 
     def get_pending_cancellation(self, booking):
         """The open cancellation request, or null.

@@ -12,6 +12,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 
 import requests
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
@@ -198,6 +199,34 @@ def initiate_payment(booking, payment_type, amount=None):
                         )
                     }
                 )
+
+        # The gateway refuses anything outside its own transaction band, and it
+        # does so AFTER the redirect — the customer would be bounced out of a
+        # payment page with nothing they can act on. Checked here so the refusal
+        # arrives on our page, in words, with the way forward in it.
+        if amount > settings.SSLCOMMERZ_MAX_AMOUNT:
+            raise ValidationError(
+                {
+                    "amount": (
+                        f"Online payments are capped at "
+                        f"{settings.SSLCOMMERZ_MAX_AMOUNT} BDT per transaction "
+                        f"by our payment gateway, and this one is {amount} BDT. "
+                        "Pay in two or more instalments using the partial "
+                        "payment option, or call us and we will take it another "
+                        "way."
+                    )
+                }
+            )
+        if amount < settings.SSLCOMMERZ_MIN_AMOUNT:
+            raise ValidationError(
+                {
+                    "amount": (
+                        f"The smallest online payment our gateway accepts is "
+                        f"{settings.SSLCOMMERZ_MIN_AMOUNT} BDT. Please settle "
+                        f"the remaining {amount} BDT with our guide on board."
+                    )
+                }
+            )
 
         live = booking.payments.filter(status=Payment.Status.PENDING).first()
         if live is not None:

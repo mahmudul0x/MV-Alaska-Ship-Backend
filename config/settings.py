@@ -8,6 +8,7 @@ See `.env.example` for the required variables.
 import os
 import sys
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import dj_database_url
@@ -381,6 +382,19 @@ _SSLCOMMERZ_BASE = (
     if SSLCOMMERZ_IS_SANDBOX
     else "https://securepay.sslcommerz.com"
 )
+# What the gateway will accept in one transaction, per its integration
+# document ("The transaction amount must be from 10.00 BDT to 500000.00 BDT").
+# Enforced on our side so an oversized booking is refused with an explanation
+# the customer can act on, rather than an opaque failure after the redirect.
+# Settings, not constants: these are the gateway's numbers, not ours, and they
+# can change without our code changing.
+SSLCOMMERZ_MIN_AMOUNT = Decimal(
+    env("SSLCOMMERZ_MIN_AMOUNT", default="10.00")
+)
+SSLCOMMERZ_MAX_AMOUNT = Decimal(
+    env("SSLCOMMERZ_MAX_AMOUNT", default="500000.00")
+)
+
 SSLCOMMERZ_SESSION_URL = f"{_SSLCOMMERZ_BASE}/gwprocess/v4/api.php"
 SSLCOMMERZ_VALIDATION_URL = f"{_SSLCOMMERZ_BASE}/validator/api/validationserverAPI.php"
 # Transaction Query API — look up a session by OUR tran_id (no val_id needed).
