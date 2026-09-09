@@ -254,3 +254,113 @@ class IpnSignatureTests(ThrottlelessTestMixin, APITestCase):
         self.assertFalse(
             sslcommerz.verify_ipn_signature({"status": "VALID", "tran_id": "T1"})
         )
+
+
+class ItemCountTests(ThrottlelessTestMixin, APITestCase):
+    """The document defines num_of_item as the number of items being sold. It
+    was hardcoded to 1, so every multi-cabin booking — the expensive ones —
+    reached the gateway's reports and dispute paperwork as a single item."""
+
+    def setUp(self):
+        _, _, _, _, self.room, self.package = build_fixtures(ship_name="Count Ship")
+
+    def sent_payload(self, booking):
+        with patch("apps.bookings.sslcommerz.requests.post") as post:
+            post.return_value.json.return_value = {
+                "status": "SUCCESS",
+                "GatewayPageURL": "https://example.test/pay",
+            }
+            post.return_value.raise_for_status.return_value = None
+            payment_service.initiate_payment(booking, Payment.PaymentType.FULL)
+        return post.call_args.kwargs["data"]
+
+    def test_the_cabin_count_is_what_the_gateway_is_told(self):
+        rooms = list(self.package.package_rooms.all())
+        self.assertGreater(len(rooms), 1, "fixture must offer more than one cabin")
+        booking = create_booking(
+            self.package,
+            [{"room": pr.room, "adult_count": 2} for pr in rooms],
+        )
+        self.assertEqual(self.sent_payload(booking)["num_of_item"], len(rooms))
+
+    def test_a_single_cabin_booking_still_sends_one(self):
+        booking = create_booking(
+            self.package, [{"room": self.room, "adult_count": 2}]
+        )
+        self.assertEqual(self.sent_payload(booking)["num_of_item"], 1)
+
+
+class RedirectVerbTests(ThrottlelessTestMixin, APITestCase):
+    """The redirect URLs only answered POST. The gateway usually posts a form
+    to them, but not always — a back button, a wallet app reopening the link,
+    or a retry after a dropped POST arrives as a GET — and those customers met
+    a 405 after their money had already been taken."""
+
+    def setUp(self):
+        _, _, _, _, self.room, self.package = build_fixtures(ship_name="Verb Ship")
+        self.booking = create_booking(
+            self.package, [{"room": self.room, "adult_count": 2}]
+        )
+        with patch("apps.bookings.sslcommerz.create_session") as session:
+            session.return_value = "https://example.test/pay"
+            self.payment, _ = payment_service.initiate_payment(
+                self.booking, Payment.PaymentType.FULL
+            )
+
+    def test_a_get_on_the_success_url_settles_and_redirects(self):
+        with patch("apps.bookings.sslcommerz.validate_payment") as validate:
+            validate.return_value = gateway_ok(self.payment)
+            response = self.client.get(
+                "/api/payments/success/",
+                {"tran_id": self.payment.transaction_id, "val_id": "VAL-1"},
+            )
+        self.assertEqual(response.status_code, 302)
+        # The booking code has to survive the GET too: without it the result
+        # page has nothing to look the booking up by, so a working redirect
+        # still leaves the customer staring at an empty page.
+        self.assertIn(self.booking.booking_code, response.url)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, Payment.Status.SUCCESS)
+
+    def test_a_get_on_the_fail_url_asks_the_gateway_before_closing(self):
+        # The redirect never closes a payment on its own say-so; it asks the
+        # gateway which attempts exist. Same on GET as on POST.
+        with patch(
+            "apps.bookings.sslcommerz.query_transaction",
+            return_value=[{"status": "FAILED"}],
+        ):
+            response = self.client.get(
+                "/api/payments/fail/", {"tran_id": self.payment.transaction_id}
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(self.booking.booking_code, response.url)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, Payment.Status.FAILED)
+
+    def test_a_get_on_the_cancel_url_redirects(self):
+        with patch(
+            "apps.bookings.sslcommerz.query_transaction",
+            return_value=[{"status": "CANCELLED"}],
+        ):
+            response = self.client.get(
+                "/api/payments/cancel/", {"tran_id": self.payment.transaction_id}
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(self.booking.booking_code, response.url)
+
+    def test_an_unknown_transaction_still_redirects_rather_than_erroring(self):
+        """A stray GET with no usable tran_id is a customer who has lost their
+        way, not an error to show them."""
+        response = self.client.get("/api/payments/cancel/", {"tran_id": "nope"})
+        self.assertEqual(response.status_code, 302)
+
+    def test_post_still_works_unchanged(self):
+        with patch("apps.bookings.sslcommerz.validate_payment") as validate:
+            validate.return_value = gateway_ok(self.payment)
+            response = self.client.post(
+                "/api/payments/success/",
+                {"tran_id": self.payment.transaction_id, "val_id": "VAL-1"},
+            )
+        self.assertEqual(response.status_code, 302)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, Payment.Status.SUCCESS)

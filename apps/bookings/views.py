@@ -325,11 +325,24 @@ class InvoiceDownloadView(APIView):
         )
 
 
+def _redirect_field(request, name):
+    """Read one field from a gateway redirect, whichever way it arrived.
+
+    SSLCommerz normally POSTs a form to the success/fail/cancel URLs, but it
+    does not promise to: some flows — a customer using the browser's back
+    button, a wallet app reopening the link, the gateway's own retry after a
+    dropped POST — arrive as a GET with the same fields in the query string.
+    Reading only `request.data` left those landing on an error page after the
+    money had already been taken.
+    """
+    return request.data.get(name) or request.query_params.get(name)
+
+
 def _frontend_redirect(result, request):
     """302 to the frontend result page. The page must fetch the booking by
     code for the real status — redirect data is presentation-only."""
     payment = None
-    tran_id = request.data.get("tran_id")
+    tran_id = _redirect_field(request, "tran_id")
     if tran_id:
         payment = Payment.objects.filter(transaction_id=tran_id).first()
     booking_code = payment.booking.booking_code if payment else ""
@@ -409,24 +422,36 @@ class PaymentIPNView(APIView):
 class PaymentSuccessView(APIView):
     """Browser lands here after paying. Runs the same idempotent processing
     as the IPN (this is the path that settles payments in local dev, where
-    the IPN can't reach localhost), then hands off to the frontend."""
+    the IPN can't reach localhost), then hands off to the frontend.
+
+    GET and POST are the same landing: the customer is arriving from the
+    gateway either way, and which verb they arrive with is not something they
+    chose. Neither is trusted — `process_payment_result` re-asks the gateway
+    what happened, exactly as the IPN path does."""
+
+    def get(self, request):
+        return self.post(request)
 
     def post(self, request):
         payment_service.process_payment_result(
-            request.data.get("tran_id"), request.data.get("val_id")
+            _redirect_field(request, "tran_id"), _redirect_field(request, "val_id")
         )
         return _frontend_redirect("success", request)
 
 
 class PaymentFailView(APIView):
     """Browser lands here when the gateway reports a failed attempt. The
-    redirect is attacker-controllable (a plain POST with any tran_id), so it
+    redirect is attacker-controllable (a plain request with any tran_id), so it
     never closes a payment by itself — the gateway is asked what actually
-    happened and only its answer changes state. The default anon throttle
-    stays on: each hit costs an outbound gateway call."""
+    happened and only its answer changes state. Accepting GET as well as POST
+    widens who can trigger that outbound call but not what it can do; the
+    default anon throttle stays on, as each hit costs one."""
+
+    def get(self, request):
+        return self.post(request)
 
     def post(self, request):
-        payment_service.close_payment_from_redirect(request.data.get("tran_id"))
+        payment_service.close_payment_from_redirect(_redirect_field(request, "tran_id"))
         return _frontend_redirect("fail", request)
 
 
@@ -434,6 +459,9 @@ class PaymentCancelView(APIView):
     """Same trust model as PaymentFailView — presentation-first, state only
     on the gateway's confirmed answer."""
 
+    def get(self, request):
+        return self.post(request)
+
     def post(self, request):
-        payment_service.close_payment_from_redirect(request.data.get("tran_id"))
+        payment_service.close_payment_from_redirect(_redirect_field(request, "tran_id"))
         return _frontend_redirect("cancel", request)

@@ -88,7 +88,12 @@ def create_session(payment):
         "cus_city": "N/A",
         "cus_country": "Bangladesh",
         "shipping_method": "NO",
-        "num_of_item": 1,
+        # The cabins on the booking, not a flat 1 — this is what the gateway's
+        # own reports and dispute paperwork show as the quantity sold. Floored
+        # at 1 defensively: a booking always has a cabin, but sending 0 would
+        # have the gateway refuse the session outright, which costs the
+        # customer their payment rather than costing us an accurate report.
+        "num_of_item": max(1, booking.rooms.count()),
         "product_name": f"Ship package {booking.booking_code}",
         "product_category": "Travel",
         # "general" needs no vertical-specific extra fields (travel-vertical
