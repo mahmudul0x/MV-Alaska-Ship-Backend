@@ -18,6 +18,8 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.files.base import ContentFile
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
@@ -1282,3 +1284,149 @@ class GatewayReturnByDefaultTests(ThrottlelessTestMixin, APITestCase):
         sla = self.package.ship.refund_sla_days
         self.assertIn(f"within {sla} working days", body)
         self.assertIn("bank or wallet provider's own processing", body)
+
+
+class RefundGatewayTransactionTests(ThrottlelessTestMixin, APITestCase):
+    """A refund row must carry the transactions it will be issued against.
+
+    SSLCommerz refunds a TRANSACTION; our ledger records a booking-level
+    liability. Whoever issues the payout — by hand in the merchant panel now,
+    through the refund API once the VPS gives us a static IP — needs the ids on
+    the row in front of them, not six navigation steps away, because the cost
+    of picking the wrong one is refunding the wrong customer's money.
+    """
+
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            username=unique("ops"), password="pass12345", is_staff=True
+        )
+        self.client.force_authenticate(user=self.staff)
+        self.ship, self.package, self.room_a, self.room_b = build_world(
+            ship_name=unique("Txn"), starts_in_days=30
+        )
+        self.booking = make_booking(self.package, self.room_a, paid="9000.00")
+
+    def settle(self, amount, *, bank_tran_id, tran_id, card="BKASH-BKash", **extra):
+        return Payment.objects.create(
+            booking=self.booking,
+            amount=Decimal(amount),
+            payment_type=Payment.PaymentType.PARTIAL,
+            status=extra.pop("status", Payment.Status.SUCCESS),
+            transaction_id=tran_id,
+            paid_at=extra.pop("paid_at", timezone.now()),
+            gateway_payload={"bank_tran_id": bank_tran_id, "card_type": card},
+            **extra,
+        )
+
+    def refund_row(self):
+        response = self.client.post(
+            "/api/staff/refunds/",
+            {
+                "booking_code": self.booking.booking_code,
+                "reason": Refund.Reason.OVERPAYMENT,
+                "amount": "1000.00",
+                "note": "Paid twice.",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        listing = self.client.get("/api/staff/refunds/")
+        self.assertEqual(listing.status_code, 200)
+        return listing.data["results"][0]
+
+    def test_the_row_carries_the_bank_tran_id_a_panel_refund_needs(self):
+        self.settle("9000.00", bank_tran_id="2607121248429Af9", tran_id="BK-AAA-P1")
+
+        row = self.refund_row()
+
+        self.assertEqual(len(row["gateway_transactions"]), 1)
+        txn = row["gateway_transactions"][0]
+        self.assertEqual(txn["bank_tran_id"], "2607121248429Af9")
+        self.assertEqual(txn["transaction_id"], "BK-AAA-P1")
+        self.assertEqual(txn["amount"], "9000.00")
+        self.assertEqual(txn["card_type"], "BKASH-BKash")
+
+    def test_a_booking_paid_in_instalments_lists_both_transactions_in_order(self):
+        """The case that makes this more than a convenience: a full refund on a
+        deposit-plus-balance booking is TWO panel refunds, and missing the
+        second one silently short-pays the customer."""
+        earlier = timezone.now() - timedelta(days=2)
+        self.settle(
+            "4000.00", bank_tran_id="BANKLATER", tran_id="BK-AAA-P2"
+        )
+        self.settle(
+            "5000.00", bank_tran_id="BANKFIRST", tran_id="BK-AAA-P1", paid_at=earlier
+        )
+
+        row = self.refund_row()
+
+        self.assertEqual(
+            [t["bank_tran_id"] for t in row["gateway_transactions"]],
+            ["BANKFIRST", "BANKLATER"],
+        )
+
+    def test_unsettled_payments_are_not_offered_as_refundable(self):
+        """Money that never arrived cannot be sent back, and a PENDING row has
+        no bank_tran_id to refund against anyway."""
+        self.settle("9000.00", bank_tran_id="REAL", tran_id="BK-AAA-P1")
+        self.settle(
+            "9000.00",
+            bank_tran_id="",
+            tran_id="BK-AAA-P2",
+            status=Payment.Status.PENDING,
+            paid_at=None,
+        )
+        self.settle(
+            "9000.00",
+            bank_tran_id="",
+            tran_id="BK-AAA-P3",
+            status=Payment.Status.FAILED,
+            paid_at=None,
+        )
+
+        row = self.refund_row()
+
+        self.assertEqual([t["bank_tran_id"] for t in row["gateway_transactions"]], ["REAL"])
+
+    def test_listing_many_refunds_does_not_query_per_row(self):
+        """The register is paginated and every row now reaches for its
+        booking's payments. Without the prefetch that is one query per refund,
+        which is the classic way a list page gets slow only in production."""
+        self.settle("9000.00", bank_tran_id="B1", tran_id="BK-AAA-P1")
+        for i in range(4):
+            # A cabin can only be sold once per sailing, so each extra booking
+            # needs a cabin of its own.
+            room = Room.objects.create(
+                ship=self.ship,
+                room_type=self.room_a.room_type,
+                room_number=unique("N"),
+            )
+            PackageRoom.objects.create(package=self.package, room=room)
+            booking = make_booking(self.package, room, paid="9000.00")
+            Payment.objects.create(
+                booking=booking,
+                amount=Decimal("9000.00"),
+                payment_type=Payment.PaymentType.FULL,
+                status=Payment.Status.SUCCESS,
+                transaction_id=f"BK-BULK-{i}",
+                paid_at=timezone.now(),
+                gateway_payload={"bank_tran_id": f"BANK{i}", "card_type": "VISA"},
+            )
+            services.create_refund(
+                booking,
+                reason=Refund.Reason.OVERPAYMENT,
+                amount=Decimal("100.00"),
+                note="bulk",
+                user=self.staff,
+            )
+        self.refund_row()  # one more, so there are five
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.get("/api/staff/refunds/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 5)
+        # A handful for auth, the count, the page and the prefetch — nowhere
+        # near one per refund. The exact number is not the point; the ceiling
+        # is, so that this fails if the prefetch is ever dropped.
+        self.assertLess(len(ctx.captured_queries), 15, ctx.captured_queries)

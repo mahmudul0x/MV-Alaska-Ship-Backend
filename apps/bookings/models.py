@@ -684,6 +684,29 @@ class Payment(models.Model):
         """
         return self.gateway_risk_level == 1
 
+    @property
+    def bank_tran_id(self):
+        """The bank-level id SSLCommerz issues for a settled payment.
+
+        Read out of the stored gateway response rather than kept in its own
+        column: it arrives only on settlement, it is never queried on, and the
+        raw payload is already retained verbatim.
+
+        This is the id a refund is raised AGAINST — both by hand in the
+        merchant panel today and, once the VPS gives us a static IP, by the
+        refund API. Surfacing it is what stops staff hunting for the right
+        transaction and refunding the wrong one.
+        """
+        payload = self.gateway_payload or {}
+        return payload.get("bank_tran_id") or ""
+
+    @property
+    def card_type(self):
+        """How it was paid ("BKASH-BKash", "VISA-Dutch Bangla Bank"), for
+        recognising the transaction in the panel's list."""
+        payload = self.gateway_payload or {}
+        return payload.get("card_type") or ""
+
     def __str__(self):
         return f"{self.booking.booking_code}: {self.amount} ({self.status})"
 

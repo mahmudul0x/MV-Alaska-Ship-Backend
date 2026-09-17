@@ -164,9 +164,19 @@ class StaffRefundViewSet(
     permission_classes = [IsAdminUser]
     pagination_class = StaffPagination
     serializer_class = StaffRefundSerializer
-    queryset = Refund.objects.select_related(
-        "booking", "booking__package", "booking__package__ship", "created_by", "processed_by"
-    ).all()
+    queryset = (
+        Refund.objects.select_related(
+            "booking",
+            "booking__package",
+            "booking__package__ship",
+            "created_by",
+            "processed_by",
+        )
+        # The gateway transaction ids each row carries, in one query for the
+        # whole page rather than one per refund.
+        .prefetch_related("booking__payments")
+        .all()
+    )
 
     def get_queryset(self):
         qs = super().get_queryset()

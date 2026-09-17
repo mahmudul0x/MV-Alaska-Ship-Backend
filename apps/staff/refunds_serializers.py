@@ -176,6 +176,7 @@ class StaffRefundSerializer(serializers.ModelSerializer):
     processed_by_name = serializers.SerializerMethodField()
     age_days = serializers.SerializerMethodField()
     overdue = serializers.SerializerMethodField()
+    gateway_transactions = serializers.SerializerMethodField()
 
     class Meta:
         model = Refund
@@ -205,8 +206,39 @@ class StaffRefundSerializer(serializers.ModelSerializer):
             "created_at",
             "age_days",
             "overdue",
+            "gateway_transactions",
         ]
         read_only_fields = fields
+
+    def get_gateway_transactions(self, refund):
+        """The settled payments this refund is raised against.
+
+        A refund is a booking-level liability, but SSLCommerz refunds a
+        TRANSACTION — so whoever issues the payout, in the merchant panel now
+        or through the refund API later, needs the ids. Without them the only
+        route is Refund register → booking code → Bookings → open the booking →
+        find the payment → copy, which is six steps of opportunity to refund
+        the wrong transaction.
+
+        Several rows when the booking was paid in instalments: a deposit and a
+        balance are two transactions, and a full refund has to be issued
+        against both.
+        """
+        return [
+            {
+                "transaction_id": payment.transaction_id,
+                "bank_tran_id": payment.bank_tran_id,
+                "amount": str(payment.amount),
+                "card_type": payment.card_type,
+                "paid_at": payment.paid_at,
+            }
+            # Filtered in Python, not with .filter(): the viewset prefetches
+            # every payment, and a queryset filter here would re-query per row.
+            for payment in sorted(
+                (p for p in refund.booking.payments.all() if p.status == "success"),
+                key=lambda p: p.paid_at or p.created_at,
+            )
+        ]
 
     def get_created_by_name(self, refund):
         return refund.created_by.get_username() if refund.created_by_id else "system"

@@ -801,6 +801,13 @@ class StaffOverviewView(APIView):
                 "pending_cancellation_count": pending_cancellations["count"] or 0,
                 "pending_cancellation_refund_total": pending_cancellations["total"]
                 or Decimal("0.00"),
+                # Payments the gateway flagged as high risk, or that the IPN
+                # could not process. Each is holding money, a cabin, or both,
+                # and until now nothing in the dashboard mentioned them at all
+                # — the flag was set and then only ever read by a log file.
+                "payments_needing_review": Payment.objects.filter(
+                    needs_manual_review=True
+                ).count(),
                 "bookings_today": Booking.objects.filter(
                     created_at__date=today
                 ).count(),
