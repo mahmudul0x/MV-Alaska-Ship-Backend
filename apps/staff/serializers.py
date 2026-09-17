@@ -469,6 +469,7 @@ class StaffPackageSerializer(serializers.ModelSerializer):
             "min_deposit_percent", "balance_due_days_before_start",
             "duration_days", "duration_nights", "effective_days", "effective_nights",
             "marketing_title", "marketing_description", "hero_image", "highlights",
+            "offer_label", "discount_type", "discount_value", "offer_ends_at",
             "bookings_count", "paid_total", "due_total", "rooms_total", "is_bookable",
         ]
 
@@ -500,6 +501,10 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         if self.instance:
             package.pk = self.instance.pk
         package.min_deposit_percent = value("min_deposit_percent")
+        # Offer fields go through clean() too, or a 150% discount reaches the
+        # pricing code and sells cabins for a negative amount.
+        package.discount_type = value("discount_type") or Package.OfferType.NONE
+        package.discount_value = value("discount_value") or Decimal("0.00")
         package.duration_days = value("duration_days")
         package.duration_nights = value("duration_nights")
         package.clean()

@@ -676,7 +676,15 @@ class NotificationTests(PaymentQABase):
 
 class CouponTests(PaymentQABase):
     def test_T17_no_coupon_feature_exists(self):
-        """Item 15 — still N/A. Nothing named coupon/discount/promo anywhere."""
+        """Item 15 — still N/A. Nothing named coupon/promo_code anywhere.
+
+        Package offers DO exist now (Package.discount_type / discount_value):
+        a sailing can be sold at a reduced price, set by staff. That is a price
+        on the package, not a code — nothing is entered at checkout, nothing
+        can be shared or guessed, and the quote needs no extra input from the
+        customer to be right. This guard is about the code-entry feature, and
+        that deliberately does not exist.
+        """
         import os
 
         backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

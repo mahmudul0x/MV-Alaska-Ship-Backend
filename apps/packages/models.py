@@ -1,5 +1,5 @@
 from datetime import datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.conf import settings
 from django.contrib.postgres.constraints import ExclusionConstraint
@@ -25,7 +25,15 @@ class PackageQuerySet(models.QuerySet):
         )
 
 
+class OfferType(models.TextChoices):
+    NONE = "none", "No offer"
+    PERCENT = "percent", "Percentage off"
+    FIXED = "fixed", "Fixed amount off, per cabin"
+
+
 class Package(models.Model):
+    OfferType = OfferType
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         OPEN = "open", "Open"
@@ -109,6 +117,42 @@ class Package(models.Model):
     )
     marketing_description = models.TextField(blank=True)
     hero_image = models.ImageField(upload_to="packages/hero/", blank=True)
+    # ── Offer ────────────────────────────────────────────────────────────────
+    # A sailing can be sold at a reduced price for a while. It lives on the
+    # package because that is what it is — a price this sailing carries, the
+    # same as adult_price does. It is deliberately NOT a code the customer
+    # types in: nothing is entered at checkout, nothing can be shared or
+    # guessed, and the quote needs no extra input to be right.
+    offer_label = models.CharField(
+        max_length=60,
+        blank=True,
+        help_text='Shown on the public cards, e.g. "Eid Offer" or "Early Bird".',
+    )
+    discount_type = models.CharField(
+        max_length=10,
+        choices=OfferType.choices,
+        default=OfferType.NONE,
+        help_text="What kind of reduction, if any, this sailing is sold at.",
+    )
+    discount_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text=(
+            "Percent off, or taka off PER CABIN — a 3-cabin booking gets a "
+            "fixed discount three times, once against each cabin, because that "
+            "is how the cabins are priced."
+        ),
+    )
+    offer_ends_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "When the offer stops applying (Bangladesh time). Leave blank to "
+            "run it until the discount is removed by hand. Bookings already "
+            "priced keep the discount they were given."
+        ),
+    )
     highlights = models.JSONField(
         default=list,
         blank=True,
@@ -162,9 +206,70 @@ class Package(models.Model):
     # never conflict — only real (sellable or sailed) voyages do.
     ACTIVE_STATUSES = (Status.OPEN, Status.CLOSED, Status.COMPLETED)
 
+    def offer_is_live(self, now=None):
+        """Whether this sailing is currently being sold at a reduced price.
+
+        A window that has closed is simply not an offer any more — but note
+        that bookings priced while it was open keep what they were given: the
+        discount is frozen into each cabin's price_snapshot, exactly like every
+        other rate. Ending an offer never re-prices someone who already booked.
+        """
+        if self.discount_type == OfferType.NONE or self.discount_value <= 0:
+            return False
+        if self.offer_ends_at and self.offer_ends_at <= (now or timezone.now()):
+            return False
+        return True
+
+    def discount_on(self, subtotal):
+        """What this offer takes off one cabin costing `subtotal` (Decimal).
+
+        Capped at the subtotal itself: a 120% discount, or a flat 5,000 off a
+        3,000 cabin, must come to a free cabin and never a negative one — the
+        booking total feeds a non-negative CheckConstraint, and money owed to
+        the customer is a refund, not a booking.
+        """
+        if not self.offer_is_live():
+            return Decimal("0.00")
+        if self.discount_type == OfferType.PERCENT:
+            raw = subtotal * self.discount_value / Decimal("100")
+        else:
+            raw = self.discount_value
+        # Round once, here, so the discount is a real money amount rather than
+        # a repeating fraction that the total then inherits.
+        raw = raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return min(raw, subtotal)
+
     def clean(self):
         if self.start_date and self.end_date and self.end_date <= self.start_date:
             raise ValidationError({"end_date": "End date must be after start date."})
+        if self.discount_type != OfferType.NONE:
+            if self.discount_value <= 0:
+                raise ValidationError(
+                    {
+                        "discount_value": (
+                            "An offer needs an amount. Set the type back to "
+                            "“No offer” to sell at the normal price."
+                        )
+                    }
+                )
+            if (
+                self.discount_type == OfferType.PERCENT
+                and self.discount_value > Decimal("100")
+            ):
+                raise ValidationError(
+                    {"discount_value": "A percentage discount cannot exceed 100%."}
+                )
+        elif self.discount_value and self.discount_value > 0:
+            # Left behind after switching the type back — harmless to price
+            # (offer_is_live() is false either way) but it would reappear the
+            # moment someone set a type again, as a discount nobody chose.
+            raise ValidationError(
+                {
+                    "discount_value": (
+                        "Clear the amount as well when there is no offer."
+                    )
+                }
+            )
         # One ship cannot run two voyages over the same nights. Same-day
         # turnaround (this end_date == next start_date) is allowed, so the
         # comparison is half-open: [start_date, end_date).

@@ -48,6 +48,11 @@ class PackageListSerializer(serializers.ModelSerializer):
     # on a plain Package — the staff dashboard and tests build those directly.
     cabins_total = serializers.SerializerMethodField()
     cabins_free = serializers.SerializerMethodField()
+    # The offer, as a customer needs to read it. Null unless one is actually
+    # running — an expired window or a zero amount is not an offer, and
+    # deciding that here rather than on the client means the cards, the booking
+    # page and any future consumer all agree about when to show it.
+    offer = serializers.SerializerMethodField()
 
     class Meta:
         model = Package
@@ -73,7 +78,20 @@ class PackageListSerializer(serializers.ModelSerializer):
             "highlights",
             "cabins_total",
             "cabins_free",
+            "offer",
         ]
+
+    def get_offer(self, package):
+        """The live offer, or None. The actual money still comes from the
+        quote — this is the advertised headline, not a price."""
+        if not package.offer_is_live():
+            return None
+        return {
+            "label": package.offer_label,
+            "type": package.discount_type,
+            "value": str(package.discount_value),
+            "ends_at": package.offer_ends_at,
+        }
 
     def get_cabins_total(self, package):
         annotated = getattr(package, "cabins_total", None)

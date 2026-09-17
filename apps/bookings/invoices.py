@@ -738,6 +738,14 @@ def generate_invoice_pdf(invoice):
                 f"{breakdown['foreigner_kid_surcharge']})",
                 breakdown["foreigner_kid_surcharge"] * breakdown["foreign_kid_count"],
             ))
+        # The offer, last, so it reads as a reduction of the lines above it.
+        # Negative on purpose: an invoice that lists a discount as a positive
+        # charge is an invoice whose column does not add up. Label and amount
+        # both come from the snapshot, so an offer that has since ended still
+        # prints exactly as the customer was given it.
+        if breakdown["discount"]:
+            label = breakdown["offer_label"] or "Offer"
+            charge_rows.append((f"    {label} — discount", -breakdown["discount"]))
     if not any_snapshot:
         # Pre-snapshot booking (or snapshots that never got written): the stored
         # total is still the money truth, so show it as a single line rather

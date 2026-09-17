@@ -51,6 +51,15 @@ def price_breakdown(
     foreigner_subtotal = (
         adult_surcharge * foreign_adults + kid_surcharge * foreign_kids
     )
+    # Everything the cabin costs before the sailing's offer is taken off. The
+    # discount is applied HERE, in the one place every caller goes through —
+    # the quote, Booking.reprice() and the invoice all read this function, so
+    # there is no path by which a customer is quoted an offer and charged
+    # without it.
+    subtotal = (
+        room_type.base_price + adults_subtotal + kids_subtotal + foreigner_subtotal
+    )
+    discount = package.discount_on(subtotal)
     return {
         "room_base": room_type.base_price,
         "adult_price": package.adult_price,
@@ -66,9 +75,14 @@ def price_breakdown(
         "foreigner_adult_surcharge": adult_surcharge,
         "foreigner_kid_surcharge": kid_surcharge,
         "foreigner_subtotal": foreigner_subtotal,
-        "total": (
-            room_type.base_price + adults_subtotal + kids_subtotal + foreigner_subtotal
-        ),
+        "subtotal": subtotal,
+        # The offer as it stood when this cabin was priced, carried alongside
+        # the amount for the same reason the rates above are: the package's
+        # offer is admin-editable and can end, and the invoice must still be
+        # able to print "Eid Offer −৳1,500" years later.
+        "offer_label": package.offer_label if discount else "",
+        "discount": discount,
+        "total": subtotal - discount,
     }
 
 
@@ -144,6 +158,9 @@ def snapshot_breakdown(breakdown, room_number=None):
         ),
         "foreigner_kid_surcharge": str(breakdown.get("foreigner_kid_surcharge", ZERO)),
         "foreigner_subtotal": str(breakdown.get("foreigner_subtotal", ZERO)),
+        "subtotal": str(breakdown.get("subtotal", breakdown["total"])),
+        "offer_label": breakdown.get("offer_label", ""),
+        "discount": str(breakdown.get("discount", ZERO)),
         "total": str(breakdown["total"]),
     }
     if room_number is not None:
@@ -183,6 +200,11 @@ def restore_breakdown(snapshot):
             snapshot.get("foreigner_kid_surcharge", "0.00")
         ),
         "foreigner_subtotal": Decimal(snapshot.get("foreigner_subtotal", "0.00")),
+        # A snapshot frozen before offers existed has no subtotal and no
+        # discount: it was sold at full price, so the subtotal IS the total.
+        "subtotal": Decimal(snapshot.get("subtotal", snapshot["total"])),
+        "offer_label": snapshot.get("offer_label", ""),
+        "discount": Decimal(snapshot.get("discount", "0.00")),
         "total": Decimal(snapshot["total"]),
         "room_number": snapshot.get("room_number"),
     }

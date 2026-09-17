@@ -33,6 +33,9 @@ PACKAGE_LIST_FIELDS = {
     # same rule the deck plan paints tiles with so the two cannot disagree.
     "cabins_total",
     "cabins_free",
+    # The running offer, or null. Whether one is running is decided server-side
+    # so the cards and the booking page cannot disagree about it.
+    "offer",
 }
 ROOM_FIELDS = {
     "id",
