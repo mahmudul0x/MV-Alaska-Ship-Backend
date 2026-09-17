@@ -1430,3 +1430,140 @@ class RefundGatewayTransactionTests(ThrottlelessTestMixin, APITestCase):
         # near one per refund. The exact number is not the point; the ceiling
         # is, so that this fails if the prefetch is ever dropped.
         self.assertLess(len(ctx.captured_queries), 15, ctx.captured_queries)
+
+
+class StaffNotificationTests(ThrottlelessTestMixin, APITestCase):
+    """The sidebar bell. Everything it counts is something a person must decide
+    on — a bell that also reports good news stops being looked at."""
+
+    URL = "/api/staff/notifications/"
+
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            username=unique("ops"), password="pass12345", is_staff=True
+        )
+        self.client.force_authenticate(user=self.staff)
+        self.ship, self.package, self.room_a, self.room_b = build_world(
+            ship_name=unique("Bell"), starts_in_days=30
+        )
+
+    def test_it_is_staff_only(self):
+        self.client.force_authenticate(user=None)
+        self.assertIn(self.client.get(self.URL).status_code, (401, 403))
+
+    def test_a_quiet_dashboard_reports_nothing(self):
+        body = self.client.get(self.URL).data
+        self.assertEqual(body["total"], 0)
+        self.assertEqual(body["cancellation_requests"]["count"], 0)
+        self.assertEqual(body["cancellation_requests"]["items"], [])
+
+    def test_a_customer_request_appears_with_what_it_would_cost(self):
+        booking = make_booking(self.package, self.room_a, paid="8000.00")
+        services.create_cancellation_request(
+            booking,
+            reason_code=CancellationRequest.Reason.PLANS_CHANGED,
+            reason_note="",
+            refund_method="",
+            refund_account_name="",
+            refund_account_number="",
+        )
+
+        body = self.client.get(self.URL).data
+
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["cancellation_requests"]["count"], 1)
+        item = body["cancellation_requests"]["items"][0]
+        self.assertEqual(item["booking_code"], booking.booking_code)
+        self.assertEqual(item["customer_name"], booking.customer_name)
+        # The id is what the bell links to, so the dialog can open directly.
+        self.assertEqual(
+            item["id"], CancellationRequest.objects.get(booking=booking).pk
+        )
+
+    def test_a_decided_request_stops_being_news(self):
+        booking = make_booking(self.package, self.room_a, paid="8000.00")
+        request = services.create_cancellation_request(
+            booking,
+            reason_code=CancellationRequest.Reason.PLANS_CHANGED,
+            reason_note="",
+            refund_method="",
+            refund_account_name="",
+            refund_account_number="",
+        )
+        services.reject_cancellation(request, user=self.staff, note="Called, staying.")
+
+        self.assertEqual(self.client.get(self.URL).data["total"], 0)
+
+    def test_a_flagged_payment_is_counted_and_marked_high_risk(self):
+        booking = make_booking(self.package, self.room_b, paid="9000.00")
+        Payment.objects.create(
+            booking=booking,
+            amount=Decimal("9000.00"),
+            payment_type=Payment.PaymentType.FULL,
+            status=Payment.Status.SUCCESS,
+            transaction_id=unique("BK-RISK-"),
+            paid_at=timezone.now(),
+            needs_manual_review=True,
+            gateway_risk_level=1,
+        )
+
+        body = self.client.get(self.URL).data
+
+        self.assertEqual(body["payments_needing_review"]["count"], 1)
+        self.assertTrue(body["payments_needing_review"]["items"][0]["high_risk"])
+        self.assertEqual(body["total"], 1)
+
+    def test_a_payout_past_its_promised_window_is_news(self):
+        """An unpaid refund past the SLA is a promise the company has broken,
+        which is exactly the thing nobody notices without being told."""
+        booking = make_booking(self.package, self.room_a, paid="8000.00")
+        refund = services.create_refund(
+            booking,
+            reason=Refund.Reason.OVERPAYMENT,
+            amount=Decimal("500.00"),
+            note="dup",
+            user=self.staff,
+        )
+        overdue_by = self.ship.refund_sla_days + 2
+        Refund.objects.filter(pk=refund.pk).update(
+            created_at=timezone.now() - timedelta(days=overdue_by)
+        )
+
+        body = self.client.get(self.URL).data
+
+        self.assertEqual(body["overdue_refunds"]["count"], 1)
+        self.assertEqual(body["overdue_refunds"]["items"][0]["age_days"], overdue_by)
+
+    def test_a_payout_still_inside_its_window_is_not(self):
+        booking = make_booking(self.package, self.room_a, paid="8000.00")
+        services.create_refund(
+            booking,
+            reason=Refund.Reason.OVERPAYMENT,
+            amount=Decimal("500.00"),
+            note="dup",
+            user=self.staff,
+        )
+
+        self.assertEqual(self.client.get(self.URL).data["overdue_refunds"]["count"], 0)
+
+    def test_the_popover_list_is_capped_but_the_count_is_not(self):
+        """Five rows is a glance; the count is what tells you there are more."""
+        for _ in range(7):
+            room = Room.objects.create(
+                ship=self.ship, room_type=self.room_a.room_type, room_number=unique("C")
+            )
+            PackageRoom.objects.create(package=self.package, room=room)
+            booking = make_booking(self.package, room, paid="8000.00")
+            services.create_cancellation_request(
+                booking,
+                reason_code=CancellationRequest.Reason.PLANS_CHANGED,
+                reason_note="",
+                refund_method="",
+                refund_account_name="",
+                refund_account_number="",
+            )
+
+        body = self.client.get(self.URL).data
+
+        self.assertEqual(body["cancellation_requests"]["count"], 7)
+        self.assertEqual(len(body["cancellation_requests"]["items"]), 5)

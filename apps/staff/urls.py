@@ -21,6 +21,7 @@ from .views import (
     StaffKidPricingRuleViewSet,
     StaffLoginView,
     StaffLogoutView,
+    StaffNotificationsView,
     StaffOverviewView,
     StaffPackageViewSet,
     StaffPaymentViewSet,
@@ -85,5 +86,8 @@ urlpatterns = [
         StaffDepartureCancelView.as_view(),
         name="staff-package-cancel-departure",
     ),
+    # Polled by every open dashboard tab, so it is its own small endpoint
+    # rather than a corner of the overview aggregate.
+    path("notifications/", StaffNotificationsView.as_view(), name="staff-notifications"),
     path("", include(router.urls)),
 ]

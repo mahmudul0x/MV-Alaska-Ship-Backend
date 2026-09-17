@@ -659,6 +659,101 @@ class StaffInvoiceViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({"detail": "Invoice email sent."})
 
 
+class StaffNotificationsView(APIView):
+    """What is waiting for a human right now, for the sidebar bell.
+
+    Deliberately NOT the overview endpoint. That one aggregates every booking
+    on the system to draw charts; this is polled every minute by every open
+    tab, so it only ever touches rows that are actually outstanding — all of
+    which are small, bounded sets by definition. If any of them is ever large,
+    that is itself the emergency the bell exists to report.
+
+    Each item carries enough to be actionable from the popover — who, how
+    much, and the id to open — because a bell that only says "3" makes you go
+    looking for the three.
+    """
+
+    permission_classes = [IsAdminUser]
+
+    #: A popover is read at a glance; the count carries the rest.
+    LIMIT = 5
+
+    def get(self, request):
+        from apps.refunds.models import CancellationRequest, Refund
+
+        pending_requests = (
+            CancellationRequest.objects.filter(
+                status=CancellationRequest.Status.PENDING
+            )
+            .select_related("booking")
+            .order_by("requested_at")
+        )
+        # Promised and not sent, past the window the customer was given. An
+        # unpaid refund is a broken promise, not merely a task.
+        overdue_refunds = [
+            refund
+            for refund in Refund.objects.filter(status=Refund.Status.PENDING)
+            .select_related("booking", "booking__package", "booking__package__ship")
+            .order_by("created_at")
+            if (timezone.now() - refund.created_at).days
+            > refund.booking.package.ship.refund_sla_days
+        ]
+        flagged_payments = (
+            Payment.objects.filter(needs_manual_review=True)
+            .select_related("booking")
+            .order_by("-created_at")
+        )
+
+        requests_count = pending_requests.count()
+        payments_count = flagged_payments.count()
+
+        return Response(
+            {
+                # One number for the badge. Everything in it is something a
+                # person has to decide on; nothing here is merely informational.
+                "total": requests_count + len(overdue_refunds) + payments_count,
+                "cancellation_requests": {
+                    "count": requests_count,
+                    "items": [
+                        {
+                            "id": row.pk,
+                            "booking_code": row.booking.booking_code,
+                            "customer_name": row.booking.customer_name,
+                            "refund_amount": str(row.refund_amount),
+                            "requested_at": row.requested_at,
+                        }
+                        for row in pending_requests[: self.LIMIT]
+                    ],
+                },
+                "overdue_refunds": {
+                    "count": len(overdue_refunds),
+                    "items": [
+                        {
+                            "id": refund.pk,
+                            "booking_code": refund.booking.booking_code,
+                            "customer_name": refund.booking.customer_name,
+                            "amount": str(refund.amount),
+                            "age_days": (timezone.now() - refund.created_at).days,
+                        }
+                        for refund in overdue_refunds[: self.LIMIT]
+                    ],
+                },
+                "payments_needing_review": {
+                    "count": payments_count,
+                    "items": [
+                        {
+                            "id": payment.pk,
+                            "booking_code": payment.booking.booking_code,
+                            "amount": str(payment.amount),
+                            "high_risk": payment.is_risky,
+                        }
+                        for payment in flagged_payments[: self.LIMIT]
+                    ],
+                },
+            }
+        )
+
+
 class StaffOverviewView(APIView):
     """Aggregate stats for the dashboard landing page."""
 
