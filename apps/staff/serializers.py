@@ -78,6 +78,7 @@ class StaffShipSerializer(serializers.ModelSerializer):
             "contact_notify_email",
             "guide_report_density",
             "default_adult_price",
+            "meal_allowance",
         ]
         read_only_fields = ["name", "status"]
 

@@ -895,3 +895,52 @@ class ShipDefaultAdultPriceTests(StaffApiTestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("adult_price", response.data)
+
+
+class ShipMealAllowanceTests(StaffApiTestCase):
+    """Turning whole-cabin pricing on is a deliberate act, so the API has to
+    let staff do it — and has to keep blank meaning "per head"."""
+
+    def ship_row(self):
+        response = self.client.get("/api/staff/ships/")
+        rows = response.data["results"] if "results" in response.data else response.data
+        return next(s for s in rows if s["id"] == self.ship.id)
+
+    def test_it_starts_blank(self):
+        self.auth()
+        self.assertIsNone(self.ship_row()["meal_allowance"])
+
+    def test_staff_can_switch_whole_cabin_pricing_on(self):
+        self.auth()
+        response = self.client.patch(
+            f"/api/staff/ships/{self.ship.id}/",
+            {"meal_allowance": "5000.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.ship.refresh_from_db()
+        self.assertTrue(self.ship.sells_whole_cabins)
+        self.assertEqual(self.ship.meal_allowance, Decimal("5000.00"))
+
+    def test_staff_can_switch_it_back_off(self):
+        self.ship.meal_allowance = Decimal("5000.00")
+        self.ship.save()
+        self.auth()
+        response = self.client.patch(
+            f"/api/staff/ships/{self.ship.id}/",
+            {"meal_allowance": None},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.ship.refresh_from_db()
+        self.assertFalse(self.ship.sells_whole_cabins)
+
+    def test_a_negative_allowance_is_refused(self):
+        """It would add money to the cabin for berths nobody is in."""
+        self.auth()
+        response = self.client.patch(
+            f"/api/staff/ships/{self.ship.id}/",
+            {"meal_allowance": "-1.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
