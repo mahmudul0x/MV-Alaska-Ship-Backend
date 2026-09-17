@@ -815,3 +815,83 @@ class StaffPackageGroupTests(StaffApiTestCase):
         ids = {p["id"] for p in response.data["results"]}
         for package in (self.upcoming, self.draft, self.finished, self.cancelled):
             self.assertIn(package.id, ids)
+
+
+class ShipDefaultAdultPriceTests(StaffApiTestCase):
+    """A starting figure for new packages, not a price.
+
+    The distinction is the whole point: a package copies this when its form
+    opens and keeps its own copy, so raising it for next season cannot rewrite
+    what customers already booked at.
+    """
+
+    def test_it_starts_unset(self):
+        """Null means no default — the form asks, as it did before. Zero would
+        pre-fill a free sailing, which looks valid and is not."""
+        self.auth()
+        response = self.client.get("/api/staff/ships/")
+        rows = response.data["results"] if "results" in response.data else response.data
+        ship = next(s for s in rows if s["id"] == self.ship.id)
+        self.assertIsNone(ship["default_adult_price"])
+
+    def test_staff_can_set_it(self):
+        self.auth()
+        response = self.client.patch(
+            f"/api/staff/ships/{self.ship.id}/",
+            {"default_adult_price": "4500.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.ship.refresh_from_db()
+        self.assertEqual(self.ship.default_adult_price, Decimal("4500.00"))
+
+    def test_staff_can_clear_it_again(self):
+        self.ship.default_adult_price = Decimal("4500.00")
+        self.ship.save()
+        self.auth()
+        response = self.client.patch(
+            f"/api/staff/ships/{self.ship.id}/",
+            {"default_adult_price": None},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.ship.refresh_from_db()
+        self.assertIsNone(self.ship.default_adult_price)
+
+    def test_a_negative_default_is_refused(self):
+        self.auth()
+        response = self.client.patch(
+            f"/api/staff/ships/{self.ship.id}/",
+            {"default_adult_price": "-100.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_changing_it_does_not_touch_an_existing_package(self):
+        """The point of copying rather than referencing. A package priced last
+        season keeps its price when next season's default is set."""
+        original = self.package.adult_price
+        self.ship.default_adult_price = Decimal("9999.00")
+        self.ship.save()
+        self.package.refresh_from_db()
+        self.assertEqual(self.package.adult_price, original)
+
+    def test_a_package_still_has_to_state_its_own_price(self):
+        """The default pre-fills the form; it is not a fallback the API applies
+        silently. Money a staffer never saw is money nobody checked."""
+        self.ship.default_adult_price = Decimal("4500.00")
+        self.ship.save()
+        self.auth()
+        response = self.client.post(
+            "/api/staff/packages/",
+            {
+                "ship": self.ship.id,
+                "start_date": "2099-07-10",
+                "end_date": "2099-07-12",
+                "status": "open",
+                "is_booking_open": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("adult_price", response.data)

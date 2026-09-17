@@ -1,3 +1,6 @@
+from decimal import Decimal
+
+from django.core.validators import MinValueValidator
 from django.db import models, transaction
 from django.utils.text import slugify
 
@@ -43,6 +46,32 @@ class Ship(models.Model):
         choices=GuideReportDensity.choices,
         default=GuideReportDensity.NORMAL,
         help_text="Guide report PDF text size / rows-per-page.",
+    )
+
+    #: What a new package's per-adult fare starts at, so staff stop retyping
+    #: the same figure for every sailing.
+    #:
+    #: A DEFAULT, deliberately — not the price itself. Each Package keeps its
+    #: own adult_price, copied from here when the form opens and editable
+    #: before it is saved, because the fare genuinely differs between sailings:
+    #: a five-night voyage is not priced like a three-night one, and Eid is not
+    #: priced like the off season. It also must not move afterwards. A package's
+    #: price is part of what its customers were quoted, so if sailings shared
+    #: one live number, raising it for next season would rewrite what people
+    #: already booked at — which is exactly why this is copied and not
+    #: referenced.
+    #:
+    #: Null means no default: the form opens empty and asks, as it did before.
+    default_adult_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text=(
+            "Pre-fills the per-adult fare on a new package. Each sailing can "
+            "still be priced differently; this is only the starting figure."
+        ),
     )
 
     # ---- Cancellation / refund policy knobs ------------------------------
