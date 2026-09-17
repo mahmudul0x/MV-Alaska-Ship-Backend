@@ -259,3 +259,42 @@ class DepositFloorPublishedTests(ThrottlelessTestMixin, APITestCase):
         response = self.client.get("/api/packages/")
         row = next(p for p in response.data if p["id"] == self.package.id)
         self.assertEqual(row["min_deposit_percent"], "40.00")
+
+
+class OfferHeadlinePriceTests(ThrottlelessTestMixin, APITestCase):
+    """The was-and-now pair the cards strike through. Computed server-side —
+    the browser does no arithmetic on money."""
+
+    def setUp(self):
+        _, _, _, _, _, self.package = build_fixtures(ship_name="Headline Ship")
+        # build_fixtures prices adults at 3000.00.
+
+    def offer(self):
+        response = self.client.get("/api/packages/")
+        row = next(p for p in response.data if p["id"] == self.package.id)
+        return row["offer"]
+
+    def test_a_percentage_publishes_both_prices(self):
+        self.package.discount_type = OfferType.PERCENT
+        self.package.discount_value = Decimal("20")
+        self.package.save()
+        offer = self.offer()
+        self.assertEqual(offer["adult_price_before"], "3000.00")
+        self.assertEqual(offer["adult_price_after"], "2400.00")
+
+    def test_an_awkward_percentage_still_lands_on_real_money(self):
+        self.package.discount_type = OfferType.PERCENT
+        self.package.discount_value = Decimal("33.33")
+        self.package.save()
+        self.assertEqual(self.offer()["adult_price_after"], "2000.10")
+
+    def test_a_fixed_offer_publishes_no_after_price(self):
+        """A flat amount comes off the cabin, so there is no honest per-adult
+        'now' price: a family of four would see a quarter of their real saving
+        and a solo traveller four times it."""
+        self.package.discount_type = OfferType.FIXED
+        self.package.discount_value = Decimal("1500")
+        self.package.save()
+        offer = self.offer()
+        self.assertEqual(offer["adult_price_before"], "3000.00")
+        self.assertIsNone(offer["adult_price_after"])

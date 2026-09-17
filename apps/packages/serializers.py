@@ -1,3 +1,5 @@
+from decimal import ROUND_HALF_UP, Decimal
+
 from rest_framework import serializers
 
 from apps.ships.serializers import (
@@ -89,15 +91,36 @@ class PackageListSerializer(serializers.ModelSerializer):
         ]
 
     def get_offer(self, package):
-        """The live offer, or None. The actual money still comes from the
-        quote — this is the advertised headline, not a price."""
+        """The live offer, or None.
+
+        `adult_price_before` / `adult_price_after` are the was-and-now pair the
+        cards strike through. They are computed here, never on the client: the
+        rule is that the browser does no arithmetic on money.
+
+        `after` is null for a fixed-amount offer, and that is deliberate. A
+        flat discount comes off the CABIN, so there is no honest way to state
+        it against a per-adult headline — a family of four would see a quarter
+        of the saving they actually get, and a solo traveller four times it.
+        The badge states such an offer in its own terms ("৳1,500 off per
+        cabin") and the card shows no struck-through price.
+        """
         if not package.offer_is_live():
             return None
+        after = None
+        if package.discount_type == Package.OfferType.PERCENT:
+            # A percentage scales cleanly: every component of the cabin, the
+            # adult fare included, is reduced by exactly this share.
+            kept = Decimal("100") - package.discount_value
+            after = (package.adult_price * kept / Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
         return {
             "label": package.offer_label,
             "type": package.discount_type,
             "value": str(package.discount_value),
             "ends_at": package.offer_ends_at,
+            "adult_price_before": str(package.adult_price),
+            "adult_price_after": str(after) if after is not None else None,
         }
 
     def get_cabins_total(self, package):
