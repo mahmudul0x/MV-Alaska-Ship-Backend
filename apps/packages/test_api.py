@@ -36,6 +36,9 @@ PACKAGE_LIST_FIELDS = {
     # The running offer, or null. Whether one is running is decided server-side
     # so the cards and the booking page cannot disagree about it.
     "offer",
+    # Deposit floor, so the booking form enforces the same rule the server
+    # does rather than a hardcoded copy of it.
+    "min_deposit_percent",
 }
 ROOM_FIELDS = {
     "id",

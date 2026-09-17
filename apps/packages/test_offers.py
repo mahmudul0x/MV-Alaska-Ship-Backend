@@ -239,3 +239,23 @@ class OfferValidationTests(ThrottlelessTestMixin, APITestCase):
         self.assert_rejects(
             discount_type=OfferType.NONE, discount_value=Decimal("500")
         )
+
+
+class DepositFloorPublishedTests(ThrottlelessTestMixin, APITestCase):
+    """The booking form has to refuse what the server would refuse. It cannot
+    do that from a hardcoded 50 — the floor is per-sailing and editable."""
+
+    def setUp(self):
+        _, _, _, _, _, self.package = build_fixtures(ship_name="Deposit Ship")
+
+    def test_the_deposit_floor_is_published_with_the_package(self):
+        response = self.client.get("/api/packages/")
+        row = next(p for p in response.data if p["id"] == self.package.id)
+        self.assertEqual(row["min_deposit_percent"], "50.00")
+
+    def test_a_changed_floor_reaches_the_form(self):
+        self.package.min_deposit_percent = Decimal("40.00")
+        self.package.save()
+        response = self.client.get("/api/packages/")
+        row = next(p for p in response.data if p["id"] == self.package.id)
+        self.assertEqual(row["min_deposit_percent"], "40.00")

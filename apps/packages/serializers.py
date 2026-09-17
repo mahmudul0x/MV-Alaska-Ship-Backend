@@ -79,6 +79,13 @@ class PackageListSerializer(serializers.ModelSerializer):
             "cabins_total",
             "cabins_free",
             "offer",
+            # The deposit floor, so the booking form can hold the customer to
+            # the same rule the server does instead of guessing at it. It is
+            # per-sailing and admin-editable, so a hardcoded 50 on the client
+            # goes stale the first time someone changes it — and a form that
+            # accepts an amount the server refuses sends the customer all the
+            # way to the pay button before telling them.
+            "min_deposit_percent",
         ]
 
     def get_offer(self, package):
