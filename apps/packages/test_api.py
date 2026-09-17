@@ -39,9 +39,6 @@ PACKAGE_LIST_FIELDS = {
     # Deposit floor, so the booking form enforces the same rule the server
     # does rather than a hardcoded copy of it.
     "min_deposit_percent",
-    # Null on a live sailing; "finished"/"cancelled" on an archived one, so one
-    # card component can render both lists.
-    "archive_reason",
 }
 ROOM_FIELDS = {
     "id",

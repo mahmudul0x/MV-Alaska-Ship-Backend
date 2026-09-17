@@ -56,9 +56,6 @@ class PackageListSerializer(serializers.ModelSerializer):
     # deciding that here rather than on the client means the cards, the booking
     # page and any future consumer all agree about when to show it.
     offer = serializers.SerializerMethodField()
-    # Null for a sailing still ahead of us; "finished" or "cancelled" once it
-    # belongs in the archive. Lets one card component render both lists.
-    archive_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = Package
@@ -92,7 +89,6 @@ class PackageListSerializer(serializers.ModelSerializer):
             # accepts an amount the server refuses sends the customer all the
             # way to the pay button before telling them.
             "min_deposit_percent",
-            "archive_reason",
         ]
 
     def get_offer(self, package):
@@ -151,20 +147,6 @@ class PackageListSerializer(serializers.ModelSerializer):
 
     def get_booking_status(self, package):
         return "open" if package.is_bookable() else "closed"
-
-    def get_archive_reason(self, package):
-        """Why a sailing belongs in the archive rather than the live list, or
-        null while it is still ahead of us.
-
-        booking_status cannot answer this: it is open/closed, and a sailing
-        that has already returned and one that was called off are both
-        "closed" while being completely different news to a reader.
-        """
-        if package.status == Package.Status.CANCELLED:
-            return "cancelled"
-        if package.end_date < timezone.localdate():
-            return "finished"
-        return None
 
     def _surcharge(self):
         """The policy row, fetched once per serialization pass rather than once
