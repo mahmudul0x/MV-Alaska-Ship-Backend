@@ -169,7 +169,22 @@ class ImmediateAvailabilityTests(QaPhase1TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.data.get("code"), "room_unavailable")
 
-    def test_quote_also_sees_the_booked_room(self):
+    def test_quote_prices_a_booked_room_and_leaves_the_refusal_to_create(self):
+        """A quote is a price preview, not a reservation, so a taken cabin
+        still gets priced.
+
+        This asserted 409 when the quote checked availability itself. That
+        check was removed deliberately: the quote runs outside any transaction,
+        so its read could only ever be an unlocked check-then-act — it would
+        report "available" for a cabin someone else was mid-way through
+        booking, and refuse one whose hold expired a moment later. Availability
+        is asserted once, under SELECT ... FOR UPDATE, in
+        BookingCreateSerializer.create (see _validate_room's docstring).
+
+        So the guarantee this pair of tests carries is: the quote never claims
+        a cabin, and create is what actually refuses one — which is
+        test_second_booking_for_same_room_gets_409 above.
+        """
         self.client.post("/api/bookings/", self.booking_payload(), format="json")
         quote = self.client.post(
             "/api/bookings/quote/",
@@ -179,7 +194,8 @@ class ImmediateAvailabilityTests(QaPhase1TestCase):
             },
             format="json",
         )
-        self.assertEqual(quote.status_code, 409)
+        self.assertEqual(quote.status_code, 200)
+        self.assertGreater(Decimal(quote.data["grand_total"]), 0)
 
     def test_unpaid_pending_booking_holds_the_room(self):
         """A PENDING booking with zero payments blocks the room (the hold);

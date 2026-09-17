@@ -35,8 +35,8 @@ class SchedulerTests(PaymentQABase):
     def test_T1_FIXED_the_payment_jobs_are_scheduled_and_ordered(self):
         """C6 fix: run_payment_jobs runs the whole set IN ORDER in one process,
         so the safety-critical ordering (reconcile a payment before releasing
-        its room) cannot be broken by cron timing. railway.json + DEPLOYMENT.md
-        commit the schedule as code."""
+        its room) cannot be broken by cron timing. DEPLOYMENT.md commits the
+        schedule as code."""
         from apps.bookings.management.commands.run_payment_jobs import (
             DAILY_JOBS,
             QUICK_JOBS,
@@ -48,14 +48,25 @@ class SchedulerTests(PaymentQABase):
             [name for name, _ in QUICK_JOBS],
             ["reconcile_pending_payments", "expire_stale_bookings"],
         )
+        # The daily set is asserted as a PREFIX, not as the whole list: what
+        # matters is that these three run, in this order, before anything else
+        # — enforce_due_deadlines reads balances that close_sailed_bookings
+        # then settles, and send_unsent_invoices retries whatever email those
+        # two produced. Housekeeping added after them (flushexpiredtokens, and
+        # whatever follows it) depends on nothing and nothing depends on it, so
+        # pinning the exact membership here only means this test fails every
+        # time an unrelated chore is added to the daily run.
+        daily = [name for name, _ in DAILY_JOBS]
         self.assertEqual(
-            [name for name, _ in DAILY_JOBS],
+            daily[:3],
             [
                 "enforce_due_deadlines",
                 "close_sailed_bookings",
                 "send_unsent_invoices",
             ],
         )
+        # ...and a chore must never be slipped in front of them.
+        self.assertNotIn("flushexpiredtokens", daily[:3])
 
         root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,7 +77,7 @@ class SchedulerTests(PaymentQABase):
         )
 
     def test_T1b_FIXED_run_payment_jobs_executes_every_job(self):
-        """The wrapper really drives all five commands."""
+        """The wrapper really drives the whole set."""
         booking = self.make_booking()
         Booking.objects.filter(pk=booking.pk).update(
             created_at=timezone.now() - timedelta(hours=3)

@@ -23,8 +23,16 @@ Failures are isolated: one job blowing up must not stop the rest (a broken
 email backend must never prevent rooms being reclaimed). The command exits
 non-zero if any job failed, so the platform's cron alerting sees it.
 
-Scheduled from railway.json. `--quick` runs only the two jobs that are
-time-sensitive (money in flight + room holds); the full set is a daily run.
+`--quick` runs only the two jobs that are time-sensitive (money in flight +
+room holds); the full set is a daily run.
+
+⚠️ NOTHING SCHEDULES THIS IN PRODUCTION YET. An earlier version of this note
+claimed railway.json did; it never had a cron block, and neither render.yaml
+nor the installed packages provide a scheduler. Until one exists, a customer
+who abandons a checkout leaves a PENDING payment that is never reconciled —
+and expire_stale_bookings rightly refuses to release a cabin while a gateway
+session is open on it, so that cabin never comes back. Whoever wires up the
+schedule: `--quick` every ~10 minutes, the full set once a day.
 """
 
 import logging
@@ -44,6 +52,12 @@ DAILY_JOBS = [
     ("enforce_due_deadlines", []),
     ("close_sailed_bookings", []),
     ("send_unsent_invoices", []),
+    # Not a payment job, but it is the same problem and there is no second
+    # scheduler to put it in: every staff logout blacklists a refresh token,
+    # and simplejwt never removes the rows once they expire. Left alone the
+    # table grows without limit for tokens that can no longer authenticate
+    # anything. Last, because it is the one job nothing else depends on.
+    ("flushexpiredtokens", []),
 ]
 
 
