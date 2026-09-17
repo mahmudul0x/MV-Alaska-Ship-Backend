@@ -1,7 +1,7 @@
 from calendar import monthrange
 from datetime import date, timedelta
 
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
@@ -58,6 +58,36 @@ class PackageViewSet(viewsets.ReadOnlyModelViewSet):
         return with_cabin_counts(
             Package.objects.public().select_related("ship")
         ).order_by("start_date")
+
+    @action(detail=False)
+    def archive(self, request):
+        """Sailings that have returned, and sailings that were called off.
+
+        A separate endpoint rather than a flag on the list, because the list
+        feeds the booking wizard's package picker and the home page as well as
+        the packages page. Widening it would put a cancelled departure in front
+        of someone choosing what to book — the one place it must never appear.
+
+        Bounded on both ends: the last year only, and never more than 24. An
+        archive is context, not a catalogue, and this is an unauthenticated
+        read that must not grow without limit as the years pass.
+        """
+        today = timezone.localdate()
+        window = today - timedelta(days=365)
+        packages = (
+            Package.objects.select_related("ship")
+            .filter(
+                Q(end_date__lt=today, status__in=Package.ACTIVE_STATUSES)
+                | Q(status=Package.Status.CANCELLED, end_date__gte=window)
+            )
+            .filter(end_date__gte=window)
+            .order_by("-start_date")[:24]
+        )
+        return Response(
+            PackageListSerializer(
+                packages, many=True, context=self.get_serializer_context()
+            ).data
+        )
 
     def get_serializer_class(self):
         if self.action == "retrieve":
