@@ -161,7 +161,30 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
     pagination_class = StaffPagination
 
     def get_queryset(self):
-        return package_stats_queryset()
+        """All packages, or one of the three groups the dashboard shows as tabs.
+
+        Filtered HERE and not in the browser, because the list is paginated:
+        filtering a 25-row page client-side means the Cancelled tab shows
+        nothing whenever the cancelled sailings happen to sit on page two.
+        """
+        queryset = package_stats_queryset()
+        group = self.request.query_params.get("group")
+        today = timezone.localdate()
+        if group == "cancelled":
+            return queryset.filter(status=Package.Status.CANCELLED)
+        if group == "past":
+            # Done with, one way or another — but not called off; that is its
+            # own group and its own kind of news.
+            return queryset.filter(
+                Q(end_date__lt=today) | Q(status=Package.Status.COMPLETED)
+            ).exclude(status=Package.Status.CANCELLED)
+        if group == "active":
+            # What staff work on day to day: still ahead of us and not written
+            # off. Drafts belong here — an unfinished sailing is live work.
+            return queryset.filter(end_date__gte=today).exclude(
+                status__in=[Package.Status.CANCELLED, Package.Status.COMPLETED]
+            )
+        return queryset
 
     @action(detail=True, methods=["post"], url_path="close-booking")
     def close_booking(self, request, pk=None):

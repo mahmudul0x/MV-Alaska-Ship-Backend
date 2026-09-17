@@ -753,3 +753,65 @@ class StaffPackageValidationMessageTests(StaffApiTestCase):
         response = self.create(discount_type="percent", discount_value="150.00")
         self.assertEqual(response.status_code, 400)
         self.assertIn("100%", str(response.data))
+
+
+class StaffPackageGroupTests(StaffApiTestCase):
+    """The dashboard's Active / Past / Cancelled tabs. Grouped server-side
+    because the list is paginated: filtering a 25-row page in the browser means
+    the Cancelled tab shows nothing whenever those sailings sit on page two."""
+
+    def setUp(self):
+        from django.utils import timezone
+
+        today = timezone.localdate()
+
+        def sailing(start_offset, end_offset, status):
+            from apps.packages.models import Package
+
+            return Package.objects.create(
+                ship=self.ship,
+                start_date=today + timezone.timedelta(days=start_offset),
+                end_date=today + timezone.timedelta(days=end_offset),
+                adult_price=Decimal("3000.00"),
+                status=status,
+            )
+
+        from apps.packages.models import Package
+
+        self.upcoming = sailing(30, 33, Package.Status.OPEN)
+        self.draft = sailing(50, 53, Package.Status.DRAFT)
+        self.finished = sailing(-20, -17, Package.Status.OPEN)
+        self.cancelled = sailing(60, 63, Package.Status.CANCELLED)
+        self.auth()
+
+    def ids(self, group):
+        response = self.client.get(f"/api/staff/packages/?group={group}")
+        self.assertEqual(response.status_code, 200)
+        return {p["id"] for p in response.data["results"]}
+
+    def test_active_holds_what_is_still_ahead(self):
+        active = self.ids("active")
+        self.assertIn(self.upcoming.id, active)
+        self.assertNotIn(self.finished.id, active)
+        self.assertNotIn(self.cancelled.id, active)
+
+    def test_a_draft_counts_as_active(self):
+        """An unfinished sailing is live work, not history."""
+        self.assertIn(self.draft.id, self.ids("active"))
+
+    def test_past_holds_what_has_sailed(self):
+        past = self.ids("past")
+        self.assertIn(self.finished.id, past)
+        self.assertNotIn(self.upcoming.id, past)
+
+    def test_a_cancelled_sailing_is_never_filed_as_past(self):
+        """It is its own group and its own kind of news — one voyage happened
+        and the other never did."""
+        self.assertNotIn(self.cancelled.id, self.ids("past"))
+        self.assertIn(self.cancelled.id, self.ids("cancelled"))
+
+    def test_no_group_still_returns_everything(self):
+        response = self.client.get("/api/staff/packages/")
+        ids = {p["id"] for p in response.data["results"]}
+        for package in (self.upcoming, self.draft, self.finished, self.cancelled):
+            self.assertIn(package.id, ids)
