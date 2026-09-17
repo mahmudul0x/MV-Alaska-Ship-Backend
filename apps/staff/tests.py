@@ -701,3 +701,55 @@ class StaffRoomImageTests(StaffApiTestCase):
         self.assertEqual(len(images), 1)
         self.assertEqual(images[0]["caption"], "Balcony")
         self.assertTrue(images[0]["image"])
+
+
+class StaffPackageValidationMessageTests(StaffApiTestCase):
+    """Staff meet these messages in a toast and nowhere else, so each one has
+    to say what is wrong without naming a field the form does not show."""
+
+    def create(self, **overrides):
+        payload = {
+            "ship": self.ship.id,
+            "start_date": "2099-06-10",
+            "end_date": "2099-06-12",
+            "adult_price": "3200.00",
+            "status": "open",
+            "is_booking_open": True,
+        }
+        payload.update(overrides)
+        return self.client.post("/api/staff/packages/", payload, format="json")
+
+    def test_an_inverted_date_range_is_refused_in_plain_words(self):
+        self.auth()
+        response = self.create(start_date="2099-06-12", end_date="2099-06-10")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("End date must be after start date", str(response.data))
+
+    def test_overlapping_dates_name_the_sailing_in_the_way(self):
+        self.auth()
+        response = self.create(
+            start_date=str(self.package.start_date),
+            end_date=str(self.package.end_date),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("overlap", str(response.data).lower())
+
+    def test_the_browsers_own_datetime_format_is_accepted(self):
+        """<input type="datetime-local"> sends "2099-06-01T12:00" — no seconds
+        and no timezone. Refusing that would fail every offer end date set from
+        the dashboard, which is the only way one is ever set."""
+        self.auth()
+        response = self.create(
+            discount_type="percent",
+            discount_value="20.00",
+            offer_label="Eid Offer",
+            offer_ends_at="2099-06-01T12:00",
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertIsNotNone(response.data["offer_ends_at"])
+
+    def test_an_impossible_discount_is_refused_before_it_prices_anything(self):
+        self.auth()
+        response = self.create(discount_type="percent", discount_value="150.00")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("100%", str(response.data))
