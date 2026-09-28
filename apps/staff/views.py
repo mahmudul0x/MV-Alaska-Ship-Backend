@@ -186,6 +186,29 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
             )
         return queryset
 
+    def perform_destroy(self, instance):
+        """A finished sailing cannot be deleted either.
+
+        The serializer refuses to edit one, and deleting is the largest edit
+        there is — it would take the bookings, payments and invoices attached
+        to it. Blocked here rather than in the serializer because destroy()
+        never runs one.
+        """
+        if (
+            instance.status == Package.Status.COMPLETED
+            or (instance.end_date and instance.end_date < timezone.localdate())
+        ):
+            raise ValidationError(
+                {
+                    "detail": (
+                        "This sailing has already finished, so it can no longer "
+                        "be deleted — its bookings, payments and invoices are "
+                        "the record of a tour that ran."
+                    )
+                }
+            )
+        super().perform_destroy(instance)
+
     @action(detail=True, methods=["post"], url_path="close-booking")
     def close_booking(self, request, pk=None):
         package = self.get_object()

@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from django.db import IntegrityError, transaction
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -21,6 +22,7 @@ from apps.bookings.models import (
     Payment,
 )
 from apps.bookings.serializers import BookingCreateSerializer
+
 from apps.packages.models import (
     ForeignerSurcharge,
     KidPricingRule,
@@ -484,7 +486,57 @@ class StaffPackageSerializer(serializers.ModelSerializer):
     def get_effective_nights(self, package):
         return package.effective_nights()
 
+    #: The one field that stays editable after a sailing is over. Marking a
+    #: finished sailing COMPLETED is bookkeeping about something that already
+    #: happened, not a change to it — and nothing sets that status
+    #: automatically, so locking it would leave staff unable to close a
+    #: sailing off at all.
+    FIELDS_EDITABLE_WHEN_FINISHED = frozenset({"status"})
+
+    def _finished_reason(self):
+        """Why this package is closed to edits, or None if it is still open.
+
+        "Finished" is the sailing being over, not the booking window being
+        shut: a package whose cutoff has passed is still ahead of us, and
+        staff legitimately keep working on it — that is exactly when an offer
+        gets added to fill the last cabins. Only departure ends the argument.
+
+        CANCELLED is deliberately NOT included. A called-off sailing that has
+        not yet departed can be reinstated, and locking it would make an
+        accidental cancellation permanent.
+        """
+        if self.instance is None:
+            return None
+        if self.instance.status == Package.Status.COMPLETED:
+            return "This sailing is marked completed"
+        if self.instance.end_date and self.instance.end_date < timezone.localdate():
+            return "This sailing has already finished"
+        return None
+
     def validate(self, attrs):
+        # A finished sailing is a record of something that happened. Editing
+        # its price, dates or marketing copy rewrites history that invoices,
+        # the guide's collection sheet and the refund quotes were all printed
+        # from — and no customer can act on the change anyway.
+        finished = self._finished_reason()
+        if finished:
+            changed = sorted(
+                field
+                for field, new in attrs.items()
+                if field not in self.FIELDS_EDITABLE_WHEN_FINISHED
+                and new != getattr(self.instance, field, None)
+            )
+            if changed:
+                raise serializers.ValidationError(
+                    {
+                        field: (
+                            f"{finished}, so it can no longer be edited. "
+                            "Create a new package for a future sailing."
+                        )
+                        for field in changed
+                    }
+                )
+
         # DRF never calls model clean(), so without this an inverted date
         # range or a ship-date overlap would hit the DB constraints and 500.
         # Merge with the existing instance so partial updates validate too
