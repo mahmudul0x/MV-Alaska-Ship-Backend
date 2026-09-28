@@ -68,11 +68,14 @@ class SchedulerTests(PaymentQABase):
         # ...and a chore must never be slipped in front of them.
         self.assertNotIn("flushexpiredtokens", daily[:3])
 
-        root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
+        # Two levels up from apps/ is the repo root, whatever the checkout is
+        # called. Walking three levels and re-entering a "backend" folder only
+        # worked while this code was a subdirectory of the workspace repo; since
+        # the split into its own repo (5527c63) that path exists on a developer
+        # machine and nowhere else, so a fresh clone or CI failed here.
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.assertTrue(
-            os.path.exists(os.path.join(root, "backend", "DEPLOYMENT.md")),
+            os.path.exists(os.path.join(repo_root, "DEPLOYMENT.md")),
             "the cron schedule must be committed as code, not tribal knowledge",
         )
 

@@ -7,6 +7,8 @@ from django.http import Http404
 from django.urls import include, path, re_path
 from rest_framework.routers import DefaultRouter
 
+from config.health import health
+
 from apps.bookings.views import (
     BookingViewSet,
     InvoiceDownloadView,
@@ -41,6 +43,9 @@ def _no_static_invoices(request, path=None):
 
 
 urlpatterns = [
+    # Container health check and uptime monitor. Kept off /api/ so it is never
+    # touched by DRF's throttling, pagination or auth defaults.
+    path("healthz/", health, name="health"),
     path("admin/", admin.site.urls),
     path("api/calendar/", CalendarView.as_view(), name="calendar"),
     # The published cancellation-charge schedule, so the policy page and the

@@ -31,15 +31,41 @@ DEBUG = env("DEBUG")
 
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 
+# The container's own health check curls http://localhost:8000/healthz/, so the
+# loopback names must stay allowed or Django answers 400 DisallowedHost, the
+# check fails, and the orchestrator restarts a perfectly healthy container in a
+# loop. Safe to add unconditionally: these Host values are only reachable from
+# inside the container/host, and the reverse proxy forwards the real Host for
+# real traffic — which ALLOWED_HOSTS still validates.
+for _loopback in ("localhost", "127.0.0.1"):
+    if _loopback not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_loopback)
+
+# Which deployed environment this is: "production", "staging", or "" for local
+# dev. Set it on every deployed app; the fail-safe below depends on it.
+DEPLOY_ENV = env("DEPLOY_ENV", default="")
+
 # Fail-safe: never boot a deployed environment with DEBUG on. DEBUG=True leaks
 # tracebacks with SECRET_KEY/DB DSN/settings on any 500, and turns off every
-# hardening flag below. Railway sets RAILWAY_ENVIRONMENT on every deploy; if we
-# see that marker with DEBUG still on, refuse to start rather than silently
-# serve insecure. Local dev has no such marker, so DEBUG=True stays fine there.
-if DEBUG and env("RAILWAY_ENVIRONMENT", default=""):
+# hardening flag below. So: if we can tell we are deployed and DEBUG is still
+# on, refuse to start rather than silently serve insecure.
+#
+# How "deployed" is detected, in order of reliability:
+#   DEPLOY_ENV            — ours, set by hand; the only one that works anywhere
+#   RENDER                — set automatically by Render
+#   RAILWAY_ENVIRONMENT   — set automatically by Railway
+# A self-hosted host (a VPS running Coolify/Docker) sets NEITHER of the last
+# two, which is why DEPLOY_ENV exists and must be set there. Local dev sets
+# none of the three, so DEBUG=True stays fine there.
+IS_DEPLOYED = bool(
+    DEPLOY_ENV in {"production", "staging"}
+    or env("RENDER", default="")
+    or env("RAILWAY_ENVIRONMENT", default="")
+)
+if DEBUG and IS_DEPLOYED:
     raise ImproperlyConfigured(
-        "DEBUG must be False in a deployed environment (RAILWAY_ENVIRONMENT is "
-        "set). Set DEBUG=False on the Railway service before deploying."
+        "DEBUG must be False in a deployed environment. Set DEBUG=False on the "
+        "host (and DEPLOY_ENV=production) before deploying."
     )
 
 
@@ -56,6 +82,18 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
+    # The container health check speaks plain HTTP to localhost, so without this
+    # exemption SECURE_SSL_REDIRECT answers it with a 301 to https://localhost/.
+    # `curl -f` treats a 301 as success, so the check would pass WITHOUT ever
+    # reaching the view — green while the database is down. Exempt the one path
+    # so the check actually tests something.
+    SECURE_REDIRECT_EXEMPT = [r"^healthz/?$"]
+
+# Origins Django accepts a CSRF-protected POST from — the admin login is the one
+# that matters. Behind a reverse proxy Django compares Origin against this list,
+# so on a new domain admin logins 403 until the domain is listed. Comma-separated
+# and scheme-qualified: "https://api.example.com,https://example.com".
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
 
 # Application definition
@@ -130,14 +168,31 @@ WSGI_APPLICATION = "config.wsgi.application"
 # client-side cursors, avoiding the "prepared statement already exists" errors
 # the pooler otherwise raises).
 
+#
+# Both settings below are pooler workarounds, not preferences. Against a DIRECT
+# Postgres (a local/VPS instance, no pgbouncer in front) they are pure overhead
+# and should be relaxed:
+#   DB_CONN_MAX_AGE=60  -> connections are reused instead of a fresh TCP
+#                          handshake + auth on every single request
+#   and DISABLE_SERVER_SIDE_CURSORS can go back to Django's default (False)
+# Kept env-driven so one deployment can move off the pooler without a code
+# change, and so local dev and CI keep working either way.
+
 DATABASES = {
     "default": dj_database_url.config(
         env="DATABASE_URL",
-        conn_max_age=0,
+        conn_max_age=env.int("DB_CONN_MAX_AGE", default=0),
+        # Django 4.1+: verify a reused connection is still alive before handing
+        # it to a request, instead of failing that request. Pointless at
+        # conn_max_age=0 (nothing is reused), essential above it.
+        conn_health_checks=env.int("DB_CONN_MAX_AGE", default=0) > 0,
     ),
 }
 
-DISABLE_SERVER_SIDE_CURSORS = True
+# True only because the Supabase transaction pooler cannot do the prepared
+# statements server-side cursors need. Set DB_SERVER_SIDE_CURSORS=True on a
+# direct Postgres to get them back.
+DISABLE_SERVER_SIDE_CURSORS = not env.bool("DB_SERVER_SIDE_CURSORS", default=False)
 
 
 # Custom user model — must be set before the first migration ever runs.
@@ -476,3 +531,91 @@ DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="MV Alaska <noreply@local
 ANYMAIL = {
     "RESEND_API_KEY": env("RESEND_API_KEY", default=""),
 }
+
+
+# Logging
+#
+# Everything goes to stdout: Docker/Render capture it, so the host's log viewer
+# is the single place to look and there is no file to rotate or fill a disk with.
+#
+# `disable_existing_loggers` MUST stay False — True silences Django's own
+# loggers, including the one that reports unhandled 500s.
+#
+# The rule that matters for a payment system: every SSLCommerz request and
+# response is logged at INFO with its transaction id (apps.bookings). When a
+# customer says they paid and the booking says otherwise, that log is the only
+# evidence of what the gateway was actually told. Never log the store password,
+# card data, or a full IPN payload containing them.
+
+LOG_LEVEL = env("LOG_LEVEL", default="INFO")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "{asctime} {levelname} {name} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        },
+        "null": {
+            "class": "logging.NullHandler",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        # 4xx/5xx responses, including the traceback for an unhandled 500.
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        # Our own code: payments, invoices, refunds, contact.
+        "apps": {
+            "handlers": ["console"],
+            "level": LOG_LEVEL,
+            "propagate": False,
+        },
+    },
+}
+
+if TESTING:
+    # 673 tests that each log would bury the actual failure. Tests assert on
+    # behaviour, not on log output.
+    LOGGING["root"]["handlers"] = ["null"]
+    LOGGING["loggers"]["django.request"]["handlers"] = ["null"]
+    LOGGING["loggers"]["apps"]["handlers"] = ["null"]
+
+
+# Error monitoring (Sentry)
+#
+# Off unless SENTRY_DSN is set, so local dev and CI never ship events. Install
+# with: pip install "sentry-sdk[django]".
+#
+# send_default_pii stays False deliberately: this app handles customer names,
+# phone numbers, emails and payment records, and none of that belongs in a
+# third-party error tracker.
+
+SENTRY_DSN = env("SENTRY_DSN", default="")
+
+if SENTRY_DSN and not TESTING:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=DEPLOY_ENV or "unknown",
+        # Which ship this instance serves, so Alaska and the sister ship do not
+        # blur together in one issue stream.
+        release=env("RELEASE_VERSION", default=""),
+        traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.1),
+        send_default_pii=False,
+    )
+    sentry_sdk.set_tag("ship", env("SHIP_NAME", default="unknown"))

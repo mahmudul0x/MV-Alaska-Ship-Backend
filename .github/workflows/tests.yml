@@ -1,0 +1,125 @@
+name: tests
+
+# Runs the whole suite on a clean Linux machine on every push and pull request.
+# Production is Linux in a container; development is Windows. This job is the
+# only place the two are compared before a deploy — it is where a path
+# separator, a missing font glyph or a timezone assumption shows up.
+
+on:
+  push:
+  pull_request:
+
+# A second push to the same branch cancels the first run still in progress:
+# only the newest commit's result is of any interest.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # A real PostgreSQL, not SQLite: the schema relies on Postgres-only
+      # features (ExclusionConstraint guarding overlapping packages,
+      # SELECT ... FOR UPDATE in the cabin-availability gate), so SQLite would
+      # pass tests that production cannot.
+      # Keep this major version matched to production.
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mv_alaska_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/mv_alaska_ci
+      SECRET_KEY: ci-only-not-a-real-secret
+
+      # DEBUG=True here is deliberate, and NOT a mistake to "fix".
+      #
+      # With DEBUG=False, settings.py activates the production hardening block,
+      # which sets SECURE_SSL_REDIRECT=True. Django's test client speaks plain
+      # HTTP to http://testserver/, so SecurityMiddleware answers almost every
+      # request with a 301 and the suite collapses — 17 of 19 API tests fail on
+      # an assertion of 301 against the real status code. Verified 2026-09-28.
+      #
+      # This matches how the suite is run locally, and it is safe: the DEBUG
+      # fail-safe only fires when a deployment marker is present (DEPLOY_ENV,
+      # RENDER or RAILWAY_ENVIRONMENT), and CI sets none of them. The
+      # fail-safe's own behaviour is covered by the separate job below.
+      DEBUG: "True"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # requirements-dev.txt pulls in requirements.txt and adds the test-only
+        # packages. Production installs requirements.txt alone.
+        run: pip install -r requirements-dev.txt
+
+      - name: Django system checks
+        run: python manage.py check
+
+      - name: Run the test suite
+        # No .env exists on a CI runner. django-environ logs that at INFO and
+        # continues, so configuration comes from the env: block above; nothing
+        # else in settings.py lacks a usable default. Verified 2026-09-28.
+        run: python manage.py test --verbosity 2
+
+  # Guards the fix that made the DEBUG fail-safe real. It had silently stopped
+  # working once the project left Railway, and the failure mode is a credential
+  # leak on every 500 response — so it gets a test that does not depend on
+  # anyone remembering it.
+  deploy-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: A deployed environment must refuse to boot with DEBUG on
+        env:
+          SECRET_KEY: ci-only-not-a-real-secret
+          DATABASE_URL: postgres://u:p@localhost:5432/unused
+          DEBUG: "True"
+          DEPLOY_ENV: production
+        run: |
+          if python -c "import django, os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings'); django.setup()" 2>/dev/null; then
+            echo "::error::settings booted with DEBUG=True in a deployed environment."
+            echo "The fail-safe in config/settings.py is not firing. With DEBUG on,"
+            echo "every 500 response leaks SECRET_KEY, the database DSN and settings."
+            exit 1
+          fi
+          echo "Correctly refused to boot."
+
+      - name: The same environment must boot with DEBUG off
+        env:
+          SECRET_KEY: ci-only-not-a-real-secret
+          DATABASE_URL: postgres://u:p@localhost:5432/unused
+          DEBUG: "False"
+          DEPLOY_ENV: production
+        run: |
+          python -c "import django, os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings'); django.setup()"
+          echo "Booted as expected."
