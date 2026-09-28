@@ -30,7 +30,7 @@ class PromotionSerializer(serializers.ModelSerializer):
             "cta_label",
             "cta_url",
             "show_in_modal",
-            "show_in_hero",
+            "show_in_top_bar",
             "show_in_home_section",
             "modal_frequency",
             "modal_delay_seconds",

@@ -118,9 +118,11 @@ class Promotion(models.Model):
         default=True,
         help_text="Pop up on the home page shortly after the visitor arrives.",
     )
-    show_in_hero = models.BooleanField(
+    show_in_top_bar = models.BooleanField(
         default=True,
-        help_text="A slim strip across the hero, on every page that has one.",
+        help_text=(
+            "A slim bar pinned above the navigation, on every page of the site."
+        ),
     )
     show_in_home_section = models.BooleanField(
         default=True,
@@ -241,7 +243,9 @@ class Promotion(models.Model):
             )
 
         if not (
-            self.show_in_modal or self.show_in_hero or self.show_in_home_section
+            self.show_in_modal
+            or self.show_in_top_bar
+            or self.show_in_home_section
         ):
             raise ValidationError(
                 "Choose at least one place to show this, or switch it off "
@@ -254,7 +258,14 @@ class Promotion(models.Model):
 
         A linked package wins over a typed URL: it is the more specific intent,
         and it keeps working if the marketing copy is edited later.
+
+        It lands on the booking flow with that sailing already chosen, not on
+        the packages list — somebody who clicked an offer for a named sailing
+        has already decided which one, and making them find it again in a list
+        is a step at which people leave. `?package=` is the parameter the
+        booking route reads (see `validateSearch` in routes/booking.tsx); keep
+        the two in step.
         """
         if self.linked_package_id:
-            return f"/packages?package={self.linked_package_id}"
+            return f"/booking?package={self.linked_package_id}"
         return self.cta_url

@@ -21,7 +21,7 @@ class StaffPromotionSerializer(serializers.ModelSerializer):
     # off and invisible. The gallery serializer hit exactly this.
     is_active = serializers.BooleanField(default=True)
     show_in_modal = serializers.BooleanField(default=True)
-    show_in_hero = serializers.BooleanField(default=True)
+    show_in_top_bar = serializers.BooleanField(default=True)
     show_in_home_section = serializers.BooleanField(default=True)
 
     is_live = serializers.SerializerMethodField()
@@ -43,7 +43,7 @@ class StaffPromotionSerializer(serializers.ModelSerializer):
             "linked_package",
             "linked_package_label",
             "show_in_modal",
-            "show_in_hero",
+            "show_in_top_bar",
             "show_in_home_section",
             "modal_frequency",
             "modal_delay_seconds",
@@ -67,10 +67,27 @@ class StaffPromotionSerializer(serializers.ModelSerializer):
         return obj.is_live()
 
     def get_linked_package_label(self, obj) -> str:
+        """How the linked sailing is named back to staff.
+
+        A bare start date identifies nothing — there are several sailings a
+        month and they all read as "2026-10-17". Lead with the name staff gave
+        the package, fall back to the ship when they gave it none, and carry
+        the date range so two runs of the same package stay distinguishable.
+
+        Mirrors `sailingLabel()` in the dashboard's promotions page, so the
+        picker and the saved row read identically. Keep the two in step.
+        """
         if not obj.linked_package_id:
             return ""
         package = obj.linked_package
-        return f"{package.start_date:%d %b %Y} — {package.ship.name}"
+        name = (package.marketing_title or "").strip() or package.ship.name
+
+        # `.day` rather than strftime's %-d: that directive is glibc-only and
+        # raises ValueError on Windows, where this project is developed.
+        def short(day):
+            return f"{day.day} {day:%b %Y}"
+
+        return f"{name} — {short(package.start_date)} → {short(package.end_date)}"
 
     def validate(self, attrs):
         """Run the model's own rules on the way in.

@@ -145,7 +145,7 @@ class PromotionValidationTests(ThrottlelessTestMixin, APITestCase):
             ship=self.ship,
             title="Eid",
             show_in_modal=False,
-            show_in_hero=False,
+            show_in_top_bar=False,
             show_in_home_section=False,
         )
         with self.assertRaises(ValidationError):
@@ -164,7 +164,7 @@ class PromotionValidationTests(ThrottlelessTestMixin, APITestCase):
             cta_url="/somewhere-else",
             linked_package=package,
         )
-        self.assertEqual(promo.resolved_cta_url, f"/packages?package={package.id}")
+        self.assertEqual(promo.resolved_cta_url, f"/booking?package={package.id}")
 
 
 class PublicPromotionEndpointTests(ThrottlelessTestMixin, APITestCase):
