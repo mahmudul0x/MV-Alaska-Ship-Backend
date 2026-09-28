@@ -19,6 +19,7 @@ from apps.bookings.views import (
 )
 from apps.contact.views import ContactMessageCreateView
 from apps.packages.views import CalendarView, PackageViewSet
+from apps.promotions.views import PromotionViewSet
 from apps.refunds.views import CancellationPolicyView
 from apps.ships.views import (
     CabinViewSet,
@@ -33,6 +34,7 @@ router.register("ships", ShipViewSet, basename="ship")
 router.register("room-types", RoomTypeViewSet, basename="room-type")
 router.register("cabins", CabinViewSet, basename="cabin")
 router.register("gallery", GalleryImageViewSet, basename="gallery")
+router.register("promotions", PromotionViewSet, basename="promotion")
 router.register("bookings", BookingViewSet, basename="booking")
 router.register("contact-messages", ContactMessageCreateView, basename="contact-message")
 

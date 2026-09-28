@@ -123,6 +123,7 @@ INSTALLED_APPS = [
     "apps.refunds",
     "apps.staff",
     "apps.contact",
+    "apps.promotions",
 ]
 
 MIDDLEWARE = [

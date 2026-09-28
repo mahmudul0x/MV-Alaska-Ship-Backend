@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from apps.contact.views import StaffContactMessageViewSet
+from apps.promotions.staff_views import StaffPromotionViewSet
 
 from .refunds_views import (
     StaffBookingCancelView,
@@ -43,6 +44,7 @@ router.register("room-images", StaffRoomImageViewSet, basename="staff-room-image
 router.register("cabins", StaffCabinViewSet, basename="staff-cabin")
 router.register("cabin-images", StaffCabinImageViewSet, basename="staff-cabin-image")
 router.register("gallery-images", StaffGalleryImageViewSet, basename="staff-gallery-image")
+router.register("promotions", StaffPromotionViewSet, basename="staff-promotion")
 router.register("kid-pricing-rules", StaffKidPricingRuleViewSet, basename="staff-kid-rule")
 router.register("food-menu-items", StaffFoodMenuItemViewSet, basename="staff-food-menu-item")
 router.register("invoices", StaffInvoiceViewSet, basename="staff-invoice")
