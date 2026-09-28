@@ -67,7 +67,9 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # requirements-dev.txt pulls in requirements.txt and adds the test-only
+        # packages. Production installs requirements.txt alone.
+        run: pip install -r requirements-dev.txt
 
       - name: Django system checks
         run: python manage.py check

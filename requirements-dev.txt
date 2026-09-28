@@ -1,0 +1,14 @@
+# Test-only dependencies. NOT installed on a deployed host: requirements.txt is
+# what production installs, and shipping these would add weight for no runtime
+# benefit.
+#
+# Install locally and in CI with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+-r requirements.txt
+
+# PDF inspection in apps/test_qa_phase6.py (`import fitz`). It was previously
+# installed by hand on a developer machine and missing from every requirements
+# file, so the test module imported fine locally and failed on any clean
+# checkout — which is exactly how CI found it.
+PyMuPDF>=1.24
