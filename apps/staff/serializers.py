@@ -464,6 +464,12 @@ class StaffPackageSerializer(serializers.ModelSerializer):
     hero_image = serializers.ImageField(
         required=False, allow_null=True, use_url=True
     )
+    # Acknowledgement, not data: set when the caller has been told what
+    # repricing a sailing with live bookings does and wants it anyway. Popped
+    # in validate() so it never reaches the model. See the guard there.
+    confirm_reprice = serializers.BooleanField(
+        write_only=True, required=False, default=False
+    )
 
     class Meta:
         model = Package
@@ -475,6 +481,7 @@ class StaffPackageSerializer(serializers.ModelSerializer):
             "marketing_title", "marketing_description", "hero_image", "highlights",
             "offer_label", "discount_type", "discount_value", "offer_ends_at",
             "bookings_count", "paid_total", "due_total", "rooms_total", "is_bookable",
+            "confirm_reprice",
         ]
 
     def get_is_bookable(self, package):
@@ -563,14 +570,27 @@ class StaffPackageSerializer(serializers.ModelSerializer):
         package.duration_nights = value("duration_nights")
         package.clean()
 
-        # Changing the price of a sailing that already has bookings on it means
-        # existing customers were quoted one figure and the package now says
-        # another. Bookings freeze their own total_amount once money is in
-        # flight (QA C7), so their money is safe — but the two would silently
-        # disagree, and the guide's collection sheet is printed from the
-        # booking. Cancel-and-rebook is the honest path, so refuse the edit.
+        # Repricing a sailing that already has bookings needs saying out loud,
+        # but it is not the catastrophe this used to treat it as.
+        #
+        # Every booking freezes its own total_amount and price_snapshot when it
+        # is priced (QA C7), so the people who already booked are untouched by
+        # this: their invoice, their balance and the guide's collection sheet
+        # all come from the booking, never from the package. What actually
+        # changes is the price the NEXT customer is quoted — which is a normal
+        # thing to want, whether costs went up or cabins are not moving.
+        #
+        # This used to refuse outright and tell staff to "cancel and rebook".
+        # That was bad advice: cancelling eight real bookings runs the
+        # cancellation-charge and refund machinery and emails eight customers,
+        # all to change a number that does not affect any of them.
+        #
+        # So it asks instead of refusing, and makes the caller say yes
+        # explicitly — an API client cannot reprice by accident, and the
+        # dashboard puts a confirmation in front of it.
+        confirmed = attrs.pop("confirm_reprice", False)
         if self.instance and "adult_price" in attrs:
-            if attrs["adult_price"] != self.instance.adult_price:
+            if attrs["adult_price"] != self.instance.adult_price and not confirmed:
                 active = self.instance.bookings.exclude(
                     status=Booking.Status.CANCELLED
                 ).count()
@@ -578,10 +598,14 @@ class StaffPackageSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         {
                             "adult_price": (
-                                f"This package has {active} active booking(s) — "
-                                "its price cannot be changed. Those customers were "
-                                "quoted the current price and their bookings hold "
-                                "it. Cancel and rebook them to re-price."
+                                f"This package has {active} active booking(s). "
+                                "They keep the price they were quoted — their "
+                                "invoices and balances will not change. Only new "
+                                "bookings will use the new price. To discount the "
+                                "remaining cabins instead, set an Offer below: "
+                                "that shows the saving on the package card and "
+                                "ends on its own date. "
+                                "Confirm to change the price anyway."
                             )
                         }
                     )

@@ -15,6 +15,7 @@ from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
+from apps.bookings.models import Booking
 from apps.packages.models import Package
 from apps.ships.models import Ship
 from apps.testing import ThrottlelessTestMixin
@@ -214,6 +215,150 @@ class PackageEditingTests(ThrottlelessTestMixin, APITestCase):
 
         response = self.client.patch(
             self._url(package), {"status": Package.Status.OPEN}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+
+
+class RepricingWithLiveBookingsTests(ThrottlelessTestMixin, APITestCase):
+    """Changing a sailing's price while people are already booked on it.
+
+    This used to be refused outright, with the advice to "cancel and rebook".
+    That was bad advice: cancelling real bookings runs the cancellation-charge
+    and refund machinery and emails those customers, all to change a number
+    that does not affect any of them. It now asks instead, and the tests pin
+    both halves — that it asks, and that saying yes leaves the existing
+    bookings exactly as they were.
+    """
+
+    def setUp(self):
+        self.ship, _ = Ship.objects.get_or_create(name="MV Alaska")
+        self.staff = User.objects.create_user(
+            username="repricer", password="pw", is_staff=True
+        )
+        self.client.force_authenticate(self.staff)
+
+        self.package = Package.objects.create(
+            ship=self.ship,
+            start_date=date.today() + timedelta(days=20),
+            end_date=date.today() + timedelta(days=22),
+            adult_price=Decimal("20000.00"),
+            status=Package.Status.OPEN,
+        )
+        self.url = reverse("staff-package-detail", args=[self.package.id])
+
+    def _add_booking(self):
+        """A booking priced against the package as it stands today."""
+        return Booking.objects.create(
+            package=self.package,
+            customer_name="Rahim",
+            phone="01700000000",
+            email="rahim@example.com",
+            total_amount=Decimal("44000.00"),
+            paid_amount=Decimal("44000.00"),
+            due_amount=Decimal("0.00"),
+            status=Booking.Status.FULLY_PAID,
+        )
+
+    def test_with_no_bookings_the_price_changes_without_ceremony(self):
+        response = self.client.patch(
+            self.url, {"adult_price": "18000.00"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.package.refresh_from_db()
+        self.assertEqual(self.package.adult_price, Decimal("18000.00"))
+
+    def test_with_bookings_it_asks_first(self):
+        self._add_booking()
+
+        response = self.client.patch(
+            self.url, {"adult_price": "18000.00"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.package.refresh_from_db()
+        self.assertEqual(self.package.adult_price, Decimal("20000.00"))
+
+    def test_the_message_points_at_offers_and_not_at_cancelling(self):
+        """The old advice would have had staff cancel live bookings. Whatever
+        this message says, it must never say that again."""
+        self._add_booking()
+
+        response = self.client.patch(
+            self.url, {"adult_price": "18000.00"}, format="json"
+        )
+        message = str(response.data["adult_price"]).lower()
+
+        self.assertIn("offer", message)
+        self.assertNotIn("cancel and rebook", message)
+
+    def test_confirming_goes_through(self):
+        self._add_booking()
+
+        response = self.client.patch(
+            self.url,
+            {"adult_price": "18000.00", "confirm_reprice": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.package.refresh_from_db()
+        self.assertEqual(self.package.adult_price, Decimal("18000.00"))
+
+    def test_the_people_already_booked_keep_what_they_were_quoted(self):
+        """The whole reason this is safe. If this ever fails, put the hard
+        block back."""
+        booking = self._add_booking()
+
+        self.client.patch(
+            self.url,
+            {"adult_price": "1.00", "confirm_reprice": True},
+            format="json",
+        )
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.total_amount, Decimal("44000.00"))
+        self.assertEqual(booking.paid_amount, Decimal("44000.00"))
+        self.assertEqual(booking.due_amount, Decimal("0.00"))
+
+    def test_a_cancelled_booking_does_not_trigger_the_question(self):
+        booking = self._add_booking()
+        booking.status = Booking.Status.CANCELLED
+        booking.save()
+
+        response = self.client.patch(
+            self.url, {"adult_price": "18000.00"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_the_acknowledgement_never_reaches_the_model_or_a_read(self):
+        """It is a flag about the request, not a field of the package."""
+        self._add_booking()
+
+        response = self.client.patch(
+            self.url,
+            {"adult_price": "18000.00", "confirm_reprice": True},
+            format="json",
+        )
+
+        self.assertNotIn("confirm_reprice", response.data)
+        self.assertFalse(hasattr(self.package, "confirm_reprice"))
+
+    def test_an_offer_can_still_be_set_without_any_confirmation(self):
+        """Discounting the remaining cabins is the recommended path, so it must
+        stay the frictionless one."""
+        self._add_booking()
+
+        response = self.client.patch(
+            self.url,
+            {
+                "discount_type": "percent",
+                "discount_value": "15.00",
+                "offer_label": "Last cabins",
+            },
+            format="json",
         )
 
         self.assertEqual(response.status_code, 200, response.data)
