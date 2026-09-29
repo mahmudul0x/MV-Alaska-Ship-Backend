@@ -1,8 +1,9 @@
 """Staff dashboard API.
 
-Every endpoint declares which role may reach it — see
-`apps.accounts.permissions` for what the three classes mean and why a new
-endpoint should default to `IsAdminRole`.
+Every endpoint names the capability it requires — see
+`apps.accounts.capabilities` for the catalogue an administrator ticks per
+account, and `apps.accounts.permissions` for how it is enforced. A new
+endpoint must name one: access is granted, never merely not denied.
 """
 
 from decimal import Decimal
@@ -16,8 +17,8 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from apps.accounts.permissions import (
-    IsAdminOrReadOnly,
-    IsAdminRole,
+    CapabilityOrReadOnly,
+    HasCapability,
     IsDashboardUser,
 )
 from rest_framework.response import Response
@@ -165,7 +166,10 @@ def ship_stats_queryset():
 
 
 class StaffPackageViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminOrReadOnly]
+    # Either capability may write here, and the serializer then checks the
+    # fields actually being changed: the schedule needs "packages", the price
+    # and the offer need "pricing". A sailing is one record, two jobs.
+    permission_classes = [CapabilityOrReadOnly.of("packages", "pricing")]
     serializer_class = StaffPackageSerializer
     pagination_class = StaffPagination
 
@@ -241,7 +245,15 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
             created += was_created
         return Response({"detail": f"{created} room(s) attached."})
 
-    @action(detail=True, methods=["get"])
+    # The booking desk needs the map to see what is free; whoever manages a
+    # sailing's cabins needs it to block and release them. Only the first needs
+    # to know who is in each one, so the serializer drops the booking details
+    # for an account without "bookings" and keeps the availability.
+    @action(
+        detail=True,
+        methods=["get"],
+        permission_classes=[HasCapability.of("bookings", "packages")],
+    )
     def rooms(self, request, pk=None):
         """Room map for one package: every attached room with its status and,
         when booked, the active booking summary (staff-only data)."""
@@ -260,7 +272,9 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
             ).select_related("booking")
         }
         serializer = StaffPackageRoomSerializer(
-            package_rooms, many=True, context={"bookings_by_room": bookings_by_room}
+            package_rooms,
+            many=True,
+            context={"bookings_by_room": bookings_by_room, "request": request},
         )
         return Response(serializer.data)
 
@@ -313,7 +327,15 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
             raise Http404("That room is not attached to this package.")
         return package_room
 
-    @action(detail=True, methods=["get"], url_path="guide-report")
+    # Its own permission, NOT the viewset's read-for-everyone: the sheet is
+    # every customer's name, phone number and outstanding balance, and
+    # "may read the catalogue" is not "may download the passenger list".
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="guide-report",
+        permission_classes=[HasCapability.of("invoices")],
+    )
     def guide_report(self, request, pk=None):
         package = self.get_object()
         # ?scope=all → every cabin (booked first, then available); default
@@ -329,7 +351,7 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
 
 
 class StaffBookingViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsDashboardUser]
+    permission_classes = [HasCapability.of("bookings")]
     pagination_class = StaffPagination
 
     def get_queryset(self):
@@ -445,7 +467,7 @@ class StaffPaymentViewSet(
     the guide collects on the ship — and resolve payments the gateway would
     never settle (`resolve` action)."""
 
-    permission_classes = [IsDashboardUser]
+    permission_classes = [HasCapability.of("payments")]
     serializer_class = StaffPaymentSerializer
     pagination_class = StaffPagination
 
@@ -534,21 +556,21 @@ class StaffShipViewSet(
     """Read + edit ship settings (helpline numbers). Ships are created via the
     seed migration / Django admin, so no create or delete here."""
 
-    permission_classes = [IsAdminOrReadOnly]
+    permission_classes = [CapabilityOrReadOnly.of("settings")]
     pagination_class = None
     serializer_class = StaffShipSerializer
     queryset = Ship.objects.all().order_by("name")
 
 
 class StaffRoomTypeViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminOrReadOnly]
+    permission_classes = [CapabilityOrReadOnly.of("rooms")]
     pagination_class = None
     serializer_class = StaffRoomTypeSerializer
     queryset = RoomType.objects.all().order_by("max_adults")
 
 
 class StaffRoomViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminOrReadOnly]
+    permission_classes = [CapabilityOrReadOnly.of("rooms")]
     serializer_class = StaffRoomSerializer
     pagination_class = StaffPagination
 
@@ -564,7 +586,7 @@ class StaffRoomImageViewSet(viewsets.ModelViewSet):
     production). Unpaginated: the whole fleet's gallery is a bounded set the
     tab reads in one request, optionally narrowed with ?room=<id>."""
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("rooms")]
     pagination_class = None
     serializer_class = StaffRoomImageSerializer
 
@@ -580,7 +602,7 @@ class StaffCabinViewSet(viewsets.ModelViewSet):
     page CRUDs these. Unpaginated: a ship carries a handful of cabin
     categories, read whole by the dashboard."""
 
-    permission_classes = [IsAdminOrReadOnly]
+    permission_classes = [CapabilityOrReadOnly.of("rooms")]
     pagination_class = None
     serializer_class = StaffCabinSerializer
     queryset = (
@@ -596,7 +618,7 @@ class StaffCabinImageViewSet(viewsets.ModelViewSet):
     is_main=true makes a photo the public card image (previous main is
     cleared atomically in the model)."""
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("rooms")]
     pagination_class = None
     serializer_class = StaffCabinImageSerializer
 
@@ -615,7 +637,7 @@ class StaffGalleryImageViewSet(viewsets.ModelViewSet):
     from the website (is_active=false) without deleting it. Unpaginated: the
     gallery is a bounded set the page reads in one request."""
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("media")]
     pagination_class = None
     serializer_class = StaffGalleryImageSerializer
     queryset = GalleryImage.objects.select_related("ship").order_by(
@@ -624,7 +646,7 @@ class StaffGalleryImageViewSet(viewsets.ModelViewSet):
 
 
 class StaffKidPricingRuleViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("pricing")]
     pagination_class = None
     serializer_class = StaffKidPricingRuleSerializer
     queryset = KidPricingRule.objects.all().order_by("min_age")
@@ -639,7 +661,7 @@ class StaffForeignerSurchargeView(generics.RetrieveUpdateAPIView):
     handle "no row yet".
     """
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("pricing")]
     serializer_class = StaffForeignerSurchargeSerializer
 
     def get_object(self):
@@ -647,7 +669,7 @@ class StaffForeignerSurchargeView(generics.RetrieveUpdateAPIView):
 
 
 class StaffFoodMenuItemViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("food_menu")]
     pagination_class = None
     serializer_class = StaffFoodMenuItemSerializer
     queryset = FoodMenuItem.objects.select_related("ship").order_by(
@@ -656,7 +678,7 @@ class StaffFoodMenuItemViewSet(viewsets.ModelViewSet):
 
 
 class StaffInvoiceViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsDashboardUser]
+    permission_classes = [HasCapability.of("invoices")]
     serializer_class = StaffInvoiceSerializer
     pagination_class = StaffPagination
 

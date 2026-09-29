@@ -14,6 +14,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from apps.accounts.capabilities import CAPABILITIES
 from apps.bookings.exceptions import RoomUnavailable
 from apps.bookings.models import (
     Booking,
@@ -62,6 +63,13 @@ class StaffTokenObtainPairSerializer(TokenObtainPairSerializer):
             # returns 403.
             "role": self.user.role,
             "is_admin": self.user.is_admin_role,
+            # What this account may actually do, administrators included, so
+            # the dashboard never re-derives "admin means all of them".
+            "capabilities": (
+                [c.key for c in CAPABILITIES]
+                if self.user.is_admin_role
+                else list(self.user.capabilities or [])
+            ),
         }
         return data
 
@@ -388,6 +396,13 @@ class StaffPackageRoomSerializer(serializers.ModelSerializer):
         booking = self._active_booking(package_room)
         if booking is None:
             return None
+        # Somebody allowed to manage a sailing's cabins sees that this one is
+        # taken (`availability` says so) but not by whom: the name and phone
+        # number are booking data, and they were not given bookings.
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is not None and not user.has_capability("bookings"):
+            return None
         return StaffPackageRoomBookingSerializer(booking).data
 
 
@@ -527,7 +542,85 @@ class StaffPackageSerializer(serializers.ModelSerializer):
             return "This sailing has already finished"
         return None
 
+    #: What the "pricing" capability covers on a sailing: what it costs, the
+    #: discount it is sold at, and the payment terms. Everything else on the
+    #: record — dates, status, copy, photos — is the "packages" capability.
+    PRICING_FIELDS = frozenset(
+        {
+            "adult_price",
+            "discount_type",
+            "discount_value",
+            "offer_label",
+            "offer_ends_at",
+            "min_deposit_percent",
+            "balance_due_days_before_start",
+        }
+    )
+
+    def _check_capabilities(self, attrs):
+        """Refuse fields this account was not given, naming them.
+
+        The viewset lets either capability write, because a sailing is one
+        record serving two jobs; this is where the split actually happens. Only
+        CHANGED fields count — the dashboard PATCHes the whole form, so an
+        unchanged price riding along with a date edit is not a price edit.
+
+        Creating a sailing is scheduling, but it necessarily states a price.
+        Taking the ship's default fare does not count as setting one, so
+        somebody given only "packages" can still add a sailing at the standard
+        rate; anything else needs "pricing".
+        """
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is None or user.is_admin_role:
+            return
+
+        ignored = {"confirm_reprice"}
+        if self.instance is None:
+            changed = {k for k in attrs if k not in ignored}
+            ship = attrs.get("ship")
+            default_fare = getattr(ship, "default_adult_price", None)
+            if default_fare is not None and attrs.get("adult_price") == default_fare:
+                changed.discard("adult_price")
+            if attrs.get("discount_type", Package.OfferType.NONE) == Package.OfferType.NONE:
+                changed -= {"discount_type", "discount_value", "offer_label", "offer_ends_at"}
+            # Payment terms at their model defaults are not a pricing decision.
+            for field in ("min_deposit_percent", "balance_due_days_before_start"):
+                if field in attrs and attrs[field] == Package._meta.get_field(field).default:
+                    changed.discard(field)
+        else:
+            changed = {
+                k
+                for k, v in attrs.items()
+                if k not in ignored and v != getattr(self.instance, k, None)
+            }
+
+        missing = {}
+        pricing = changed & self.PRICING_FIELDS
+        schedule = changed - self.PRICING_FIELDS
+        if pricing and not user.has_capability("pricing"):
+            for field in sorted(pricing):
+                missing[field] = (
+                    "This account cannot change prices or offers. An "
+                    "administrator can grant it under Staff."
+                )
+        if schedule and not user.has_capability("packages"):
+            for field in sorted(schedule):
+                missing[field] = (
+                    "This account cannot change a sailing's schedule or "
+                    "details. An administrator can grant it under Staff."
+                )
+        if self.instance is None and not user.has_capability("packages"):
+            missing.setdefault(
+                "non_field_errors",
+                ["Creating a sailing needs the sailings permission."],
+            )
+        if missing:
+            raise serializers.ValidationError(missing)
+
     def validate(self, attrs):
+        self._check_capabilities(attrs)
+
         # A finished sailing is a record of something that happened. Editing
         # its price, dates or marketing copy rewrites history that invoices,
         # the guide's collection sheet and the refund quotes were all printed

@@ -2,7 +2,7 @@ from django.db import transaction
 from rest_framework import mixins, viewsets
 from rest_framework.permissions import AllowAny
 
-from apps.accounts.permissions import IsDashboardUser
+from apps.accounts.permissions import HasCapability
 from rest_framework.throttling import ScopedRateThrottle
 
 from .emails import send_contact_notification
@@ -44,7 +44,7 @@ class StaffContactMessageViewSet(
     """Dashboard Messages queue: list/read enquiries, mark read/archived,
     delete. No create — messages only ever come from the public form."""
 
-    permission_classes = [IsDashboardUser]
+    permission_classes = [HasCapability.of("messages")]
     serializer_class = StaffContactMessageSerializer
 
     def get_queryset(self):

@@ -1,6 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from apps.accounts.capability_views import CapabilityCatalogueView
 from apps.accounts.staff_views import StaffUserViewSet
 from apps.contact.views import StaffContactMessageViewSet
 from apps.promotions.staff_views import StaffPromotionViewSet
@@ -66,6 +67,11 @@ router.register(
 )
 
 urlpatterns = [
+    path(
+        "capabilities/",
+        CapabilityCatalogueView.as_view(),
+        name="staff-capabilities",
+    ),
     path("login/", StaffLoginView.as_view(), name="staff-login"),
     path("login/refresh/", StaffTokenRefreshView.as_view(), name="staff-token-refresh"),
     path("logout/", StaffLogoutView.as_view(), name="staff-logout"),

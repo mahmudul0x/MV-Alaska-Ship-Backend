@@ -1,7 +1,8 @@
 """Staff API for the cancellation queue and the refund register.
 
-Everything here is administrators-only — this is money leaving the
-company, and booking staff have no part in it. Two rules shape the design:
+Everything here needs the "refunds" capability — this is money leaving the
+company, so it is granted deliberately and flagged as sensitive on the form
+that grants it. Two rules shape the design:
 
 - **Staff decide, they do not price.** Approving a cancellation takes no amount:
   the figures were frozen when the customer submitted and approving honours
@@ -25,7 +26,7 @@ from django.utils import timezone
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
-from apps.accounts.permissions import IsAdminRole, IsDashboardUser
+from apps.accounts.permissions import HasCapability
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -70,7 +71,7 @@ class StaffCancellationRequestViewSet(
     edited, only decided, so the record of what the customer asked for and was
     quoted stays intact."""
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("refunds")]
     pagination_class = StaffPagination
     queryset = (
         CancellationRequest.objects.select_related(
@@ -162,7 +163,7 @@ class StaffRefundViewSet(
 ):
     """The refund register: what is owed, what has been paid, and by whom."""
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("refunds")]
     pagination_class = StaffPagination
     serializer_class = StaffRefundSerializer
     queryset = (
@@ -354,7 +355,7 @@ class StaffCancellationRuleViewSet(viewsets.ModelViewSet):
     cancellations only.
     """
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("refunds")]
     serializer_class = StaffCancellationRuleSerializer
     pagination_class = None
     queryset = CancellationRule.objects.select_related("ship").all()
@@ -376,7 +377,7 @@ class StaffBookingCancelView(APIView):
     record is written, so the register cannot tell the difference later.
     """
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("refunds")]
 
     def get(self, request, pk):
         """What this cancellation would cost, so the person on the phone can
@@ -431,7 +432,7 @@ class StaffDepartureCancelView(APIView):
     holidays should not be reachable by one stray click.
     """
 
-    permission_classes = [IsAdminRole]
+    permission_classes = [HasCapability.of("refunds")]
 
     def post(self, request, pk):
         package = get_object_or_404(

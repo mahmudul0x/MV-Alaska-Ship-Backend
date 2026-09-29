@@ -3,6 +3,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from .capabilities import CAPABILITIES, CAPABILITY_KEYS, DEFAULT_CAPABILITIES
+
 User = get_user_model()
 
 
@@ -25,6 +27,14 @@ class StaffUserSerializer(serializers.ModelSerializer):
         ),
     )
     role_display = serializers.CharField(source="get_role_display", read_only=True)
+    capabilities = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        help_text="Which areas this account may use. Ignored for administrators.",
+    )
+    #: What the account can actually do, administrators included — so the
+    #: dashboard never has to re-derive "admin means all of them".
+    effective_capabilities = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -36,12 +46,33 @@ class StaffUserSerializer(serializers.ModelSerializer):
             "email",
             "role",
             "role_display",
+            "capabilities",
+            "effective_capabilities",
             "is_active",
             "password",
             "last_login",
             "date_joined",
         ]
         read_only_fields = ["last_login", "date_joined"]
+
+    def get_effective_capabilities(self, user) -> list:
+        if user.is_admin_role:
+            return [c.key for c in CAPABILITIES]
+        return list(user.capabilities or [])
+
+    def validate_capabilities(self, value):
+        """Reject anything not in the catalogue.
+
+        A typo'd key would sit in the list looking granted and grant nothing,
+        and the account's owner would be told their permissions are set while
+        the screen keeps refusing them.
+        """
+        unknown = sorted(set(value) - CAPABILITY_KEYS)
+        if unknown:
+            raise serializers.ValidationError(
+                f"Not something an account can be given: {', '.join(unknown)}."
+            )
+        return value
 
     def validate_password(self, value):
         """Run Django's own password rules rather than inventing weaker ones.
@@ -106,6 +137,14 @@ class StaffUserSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password = validated_data.pop("password")
+        # A new account with nothing ticked would be able to sign in and see an
+        # empty dashboard, which reads as broken rather than as restricted.
+        # The desk job is the sensible starting point; the form sends an
+        # explicit list whenever the administrator has chosen one.
+        if not validated_data.get("capabilities") and (
+            validated_data.get("role") != User.Role.ADMIN
+        ):
+            validated_data["capabilities"] = list(DEFAULT_CAPABILITIES)
         # is_staff is set here rather than exposed as a field: every account
         # this endpoint creates is a dashboard account by definition, and
         # leaving it writable would allow one that exists but cannot log in.
