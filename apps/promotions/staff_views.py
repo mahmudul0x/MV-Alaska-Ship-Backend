@@ -1,5 +1,5 @@
 from rest_framework import viewsets
-from rest_framework.permissions import IsAdminUser
+from apps.accounts.permissions import IsAdminRole
 
 from .models import Promotion
 from .staff_serializers import StaffPromotionSerializer
@@ -14,7 +14,7 @@ class StaffPromotionViewSet(viewsets.ModelViewSet):
     rewritten.
     """
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
     pagination_class = None
     serializer_class = StaffPromotionSerializer
     queryset = Promotion.objects.select_related("ship", "linked_package").order_by(

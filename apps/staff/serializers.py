@@ -2,7 +2,8 @@
 
 Unlike the public serializers these expose internal state (raw status,
 is_booking_open, customer data across bookings) because every staff endpoint
-sits behind IsAdminUser.
+sits behind an authenticated dashboard account (see
+apps.accounts.permissions for which role reaches which endpoint).
 """
 
 from decimal import Decimal
@@ -55,6 +56,12 @@ class StaffTokenObtainPairSerializer(TokenObtainPairSerializer):
             "username": self.user.username,
             "first_name": self.user.first_name,
             "is_staff": self.user.is_staff,
+            # The dashboard hides what this account cannot use. That is
+            # courtesy, not security — every endpoint enforces the role
+            # itself, so a hidden screen reached by typing its URL still
+            # returns 403.
+            "role": self.user.role,
+            "is_admin": self.user.is_admin_role,
         }
         return data
 

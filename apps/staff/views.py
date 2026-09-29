@@ -1,4 +1,9 @@
-"""Staff dashboard API — full CRUD behind IsAdminUser (is_staff)."""
+"""Staff dashboard API.
+
+Every endpoint declares which role may reach it — see
+`apps.accounts.permissions` for what the three classes mean and why a new
+endpoint should default to `IsAdminRole`.
+"""
 
 from decimal import Decimal
 
@@ -10,7 +15,11 @@ from rest_framework import generics, mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAdminUser
+from apps.accounts.permissions import (
+    IsAdminOrReadOnly,
+    IsAdminRole,
+    IsDashboardUser,
+)
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -88,7 +97,7 @@ class StaffTokenRefreshView(TokenRefreshView):
 
 
 class StaffLogoutView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsDashboardUser]
 
     def post(self, request):
         try:
@@ -156,7 +165,7 @@ def ship_stats_queryset():
 
 
 class StaffPackageViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrReadOnly]
     serializer_class = StaffPackageSerializer
     pagination_class = StaffPagination
 
@@ -320,7 +329,7 @@ class StaffPackageViewSet(viewsets.ModelViewSet):
 
 
 class StaffBookingViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsDashboardUser]
     pagination_class = StaffPagination
 
     def get_queryset(self):
@@ -436,7 +445,7 @@ class StaffPaymentViewSet(
     the guide collects on the ship — and resolve payments the gateway would
     never settle (`resolve` action)."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsDashboardUser]
     serializer_class = StaffPaymentSerializer
     pagination_class = StaffPagination
 
@@ -525,21 +534,21 @@ class StaffShipViewSet(
     """Read + edit ship settings (helpline numbers). Ships are created via the
     seed migration / Django admin, so no create or delete here."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrReadOnly]
     pagination_class = None
     serializer_class = StaffShipSerializer
     queryset = Ship.objects.all().order_by("name")
 
 
 class StaffRoomTypeViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrReadOnly]
     pagination_class = None
     serializer_class = StaffRoomTypeSerializer
     queryset = RoomType.objects.all().order_by("max_adults")
 
 
 class StaffRoomViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrReadOnly]
     serializer_class = StaffRoomSerializer
     pagination_class = StaffPagination
 
@@ -555,7 +564,7 @@ class StaffRoomImageViewSet(viewsets.ModelViewSet):
     production). Unpaginated: the whole fleet's gallery is a bounded set the
     tab reads in one request, optionally narrowed with ?room=<id>."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
     pagination_class = None
     serializer_class = StaffRoomImageSerializer
 
@@ -571,7 +580,7 @@ class StaffCabinViewSet(viewsets.ModelViewSet):
     page CRUDs these. Unpaginated: a ship carries a handful of cabin
     categories, read whole by the dashboard."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrReadOnly]
     pagination_class = None
     serializer_class = StaffCabinSerializer
     queryset = (
@@ -587,7 +596,7 @@ class StaffCabinImageViewSet(viewsets.ModelViewSet):
     is_main=true makes a photo the public card image (previous main is
     cleared atomically in the model)."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
     pagination_class = None
     serializer_class = StaffCabinImageSerializer
 
@@ -606,7 +615,7 @@ class StaffGalleryImageViewSet(viewsets.ModelViewSet):
     from the website (is_active=false) without deleting it. Unpaginated: the
     gallery is a bounded set the page reads in one request."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
     pagination_class = None
     serializer_class = StaffGalleryImageSerializer
     queryset = GalleryImage.objects.select_related("ship").order_by(
@@ -615,7 +624,7 @@ class StaffGalleryImageViewSet(viewsets.ModelViewSet):
 
 
 class StaffKidPricingRuleViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
     pagination_class = None
     serializer_class = StaffKidPricingRuleSerializer
     queryset = KidPricingRule.objects.all().order_by("min_age")
@@ -630,7 +639,7 @@ class StaffForeignerSurchargeView(generics.RetrieveUpdateAPIView):
     handle "no row yet".
     """
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
     serializer_class = StaffForeignerSurchargeSerializer
 
     def get_object(self):
@@ -638,7 +647,7 @@ class StaffForeignerSurchargeView(generics.RetrieveUpdateAPIView):
 
 
 class StaffFoodMenuItemViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
     pagination_class = None
     serializer_class = StaffFoodMenuItemSerializer
     queryset = FoodMenuItem.objects.select_related("ship").order_by(
@@ -647,7 +656,7 @@ class StaffFoodMenuItemViewSet(viewsets.ModelViewSet):
 
 
 class StaffInvoiceViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsDashboardUser]
     serializer_class = StaffInvoiceSerializer
     pagination_class = StaffPagination
 
@@ -659,7 +668,7 @@ class StaffInvoiceViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["get"])
     def pdf(self, request, pk=None):
-        """Stream the invoice PDF through the API, behind IsAdminUser.
+        """Stream the invoice PDF through the API, behind the dashboard.
 
         The PDF used to be handed out as a raw MEDIA_URL link — served by
         django.views.static.serve with no access check at all under DEBUG, and
@@ -696,7 +705,7 @@ class StaffNotificationsView(APIView):
     looking for the three.
     """
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsDashboardUser]
 
     #: A popover is read at a glance; the count carries the rest.
     LIMIT = 5
@@ -780,7 +789,7 @@ class StaffNotificationsView(APIView):
 class StaffOverviewView(APIView):
     """Aggregate stats for the dashboard landing page."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsDashboardUser]
 
     def get(self, request):
         today = timezone.localdate()
